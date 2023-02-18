@@ -7,3 +7,4 @@ Some useful things we've already discovered:
 - You can jump past flash read/write protection regions in the firmware calls and access flash anywhere
 
 
+Thank you to the Waterbear project for the disassembly and to Dmitry for being the first one to rip the US BIOS and release it to the community!
