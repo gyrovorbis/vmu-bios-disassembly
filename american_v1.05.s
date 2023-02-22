@@ -134,13 +134,11 @@ label_005D:
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; SLEEP_EX (Sleep/Halt Mode)
+  ;; SLEEP_EX (Sleep/CPU Halt)
   .org $0140
   callf label_0421
   not1  ext, $00
   jmpf  $0145
-
-// ========== END PUBLIC FIRMWARE SUBROUTINES ==========
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
@@ -154,11 +152,13 @@ label_005D:
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; EXIT_EX (Mode Button)
   .org $01F0
   brf   label_3C5C
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+
+// ========== END PUBLIC FIRMWARE SUBROUTINES ==========
 
 label_0200:
   mov   #$A3, ocr
