@@ -162,8 +162,8 @@ label_005D:
 
 label_0200:
   mov   #$A3, ocr
-  mov   #$7F, sp
-  clr1  psw, rambk0
+  mov   #$7F, sp        ; initialize stack pointer
+  clr1  psw, rambk0     ; change to system RAM
   clr1  p3int, $00
   mov   #$FF, $6E
   mov   #$FF, $67
@@ -6968,19 +6968,20 @@ label_3B6E:
 label_3B76:
   add   #$30
   ret
+; ==== ENABLE FLASH SAVE ICON ======
 label_3B79:
   push  acc
   push  ocr
   ld    ocr
   be    #$81, label_3B85
-  mov   #$81, ocr
+  mov   #$81, ocr           ; set clock mode to control flash
 label_3B85:
   mov   #$02, xbnk
-  mov   #$01, xram_0184
+  mov   #$01, xram_0184     ; set flash read icon to active 
 label_3B8B:
   pop   ocr
-  ld    ocr
-  be    #$81, label_3B92
+  ld    ocr                 ; restore previous clock state
+  be    #$81, label_3B92    
 label_3B92:
   pop   acc
   ret
@@ -7128,25 +7129,26 @@ label_3CA8:
 label_3CB2:
   call  label_3686
   jmpf  label_02EF
-label_3CB7:
-  call  label_3B79
-  ld    $7D
-  bnz   label_3CE1
-  push  psw
-  clr1  psw, rambk0
-  ld    $6D
-  pop   psw
-  bz    label_3CE1
+  label_3CB7:
+  call  label_3B79      ; enable flash save icon 
+  ld    $7D             ; start address
+  bnz   label_3CE1      ; disable flash save icon
+  push  psw             ; save entry PSW
+  clr1  psw, rambk0     ; swap to rambank 0
+  ld    $6D             ; first byte of shit to write? 
+  pop   psw             
+  bz    label_3CE1      ; first byte can't be 0?
   set1  psw, cy
   rolc
+  bp    psw, cy, label_3CE1         ; HIT
+  sub   $7E                         ; start address
   bp    psw, cy, label_3CE1
-  sub   $7E
-  bp    psw, cy, label_3CE1
-  ld    $7F
-  and   #$80
+  ld    $7F                         ; start address
+  and   #$80                        ; aligned to 128 bytes
   st    $7F
-  callf label_E024
+  callf label_E024          ; perform actual write
   mov   #$00, acc
+; === DISABLE FLASH SAVE ICON =====
 label_3CDE:
   call  label_3B95
   ret
@@ -8971,7 +8973,7 @@ label_E01B:
   .byte $11, $8C, $03, $11, $9A, $03
 
 label_E024:
-  brf   label_E3CE
+  brf   label_E3CE  ; perform flash write 
 label_E027:
   brf   label_E3F6
 label_E02A:
@@ -9104,25 +9106,26 @@ label_E3AB:
   .byte $A0, $22, $00, $80, $23, $54, $01, $02, $7E, $13, $05, $02, $7F, $13, $04, $50
   .byte $14, $A0
 
+; ====== PERFORM FLASH UNLOCKERY SAFETY DANCE ======
 label_E3CE:
-  set1  sfr_0154, $01
-  call  label_E3D7
-  clr1  sfr_0154, $01
-  call  label_E348
+  set1  fpr, $01    ; unlock flash for write 
+  call  label_E3D7  ; write unlock state machine to flash
+  clr1  fpr, $01    ; lock flash for write 
+  call  label_E348  ; perform actual flash write 
   ret
-label_E3D7:
-  mov   #$55, trh
-  mov   #$55, trl
+label_E3D7:         ; unlock SM state 0
+  mov   #$55, trh   
+  mov   #$55, trl   ; write 0xaa to 0x5555
   mov   #$AA, acc
-  stf
+  stf               ; unlock SM state 1
   mov   #$2A, trh
   mov   #$AA, trl
-  mov   #$55, acc
-  stf
+  mov   #$55, acc   ; write 0x55 to 0x2aaa
+  stf               ; unlock SM state 2
   mov   #$55, trh
   mov   #$55, trl
-  mov   #$A0, acc
-  stf
+  mov   #$A0, acc   ; write 0xa0 to 0x5555
+  stf               ; should be unlocked now!
   ret
 label_E3F6:
   mov   #$80, $00
