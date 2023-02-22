@@ -1,72 +1,73 @@
-
-  ;; Entry point
+  ;; ========== INTERRUPT VECTOR TABLE ==========
+  ;; Reset ISR
   .org 0
   jmp   label_0200
 
   .byte $FF
 
-  ;; Entry point
+  ;; INT0 (external) ISR
   .org $0003
   jmp   label_004F
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; INT1 (external) ISR
   .org $000B
   jmp   label_0052
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; INT2 (external) OR Timer 0 T0L overflow ISR
   .org $0013
   jmp   label_0055
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; INT3 (external) OR Base Timer overflow ISR
   .org $001B
   callf label_3DC9
   reti
 
   .byte $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; Timer 0 T0H or T0H overflow ISR
   .org $0023
   jmp   label_005A
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; Timer 1 T1H or T1L overflow ISR
   .org $002B
   jmp   label_005D
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; SIO0 (Serial Port 0) ISR
   .org $0033
   callf label_25E4
   reti
 
   .byte $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; SIO1 (Serial Port 1) ISR
   .org $003B
   callf label_260E
   reti
 
   .byte $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; RFB (VMU-to-VMU receive/detect) ISR
   .org $0043
   callf label_05E8
   reti
 
   .byte $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; P3 ISR
   .org $004B
   callf label_3E66
   reti
+;; ========== END INTERRUPT VECTOR TABLE ==========
 label_004F:
   clr1  i01cr, $01
   reti
