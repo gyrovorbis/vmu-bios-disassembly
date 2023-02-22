@@ -97,19 +97,20 @@ label_005D:
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+// ========== PUBLIC FIRMWARE SUBROUTINES ==========
+  ;; FM_WRT_EX (Write to Flash Memory)
   .org $0100
   callf label_3CB7
   not1  ext, $00
   jmpf  $0105
 
-  ;; Entry point
+  ;; FM_WRTA_EX (Write to Flash Memory)
   .org $0108
   callf label_3CB7
   not1  ext, $00
   jmpf  $010B
 
-  ;; Entry point
+  ;; FM_VRF_EX (Flash Memory Verify)
   .org $0110
   callf label_E01B
   not1  ext, $00
@@ -117,7 +118,7 @@ label_005D:
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; FM_PRD_EX (Flash Memory Page Data Readout)
   .org $0120
   callf label_E027
   not1  ext, $00
@@ -125,7 +126,7 @@ label_005D:
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; TIMER_EX (Base Timer/Clock 1/2 Second Clock Update)
   .org $0130
   callf label_3DC9
   not1  ext, $00
@@ -133,11 +134,13 @@ label_005D:
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-  ;; Entry point
+  ;; SLEEP_EX (Sleep/Halt Mode)
   .org $0140
   callf label_0421
   not1  ext, $00
   jmpf  $0145
+
+// ========== END PUBLIC FIRMWARE SUBROUTINES ==========
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
