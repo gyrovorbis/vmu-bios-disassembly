@@ -97,7 +97,7 @@ label_005D:
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-// ========== PUBLIC FIRMWARE SUBROUTINES ==========
+;; ========== PUBLIC FIRMWARE SUBROUTINES ==========
   ;; FM_WRT_EX (Write to Flash Memory)
   .org $0100
   callf label_3CB7
@@ -158,7 +158,7 @@ label_005D:
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
-// ========== END PUBLIC FIRMWARE SUBROUTINES ==========
+;; ========== END PUBLIC FIRMWARE SUBROUTINES ==========
 
 label_0200:
   mov   #$A3, ocr
