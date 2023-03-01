@@ -367,7 +367,7 @@ label_03AE:
   mov   #$00, xram_0183
   mov   #$00, xbnk
   pop   ocr
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$00, trl
@@ -981,7 +981,7 @@ label_09BB:
   mov   #$08, vtrbf
   mov   #$07, vlreg
   mov   #$00, acc
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$00, trl
@@ -996,7 +996,7 @@ label_09E3:
   mov   #$00, acc
   mov   #$02, b
   call  label_0F4A
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$47, trl
@@ -1010,7 +1010,7 @@ label_09E3:
   set1  vsel, $00
   set1  sfr_0160, $00
   call  label_0FBF
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$48, trl
@@ -1103,7 +1103,7 @@ label_0B7D:
   set1  psw, rambk0
   ld    $7D
   clr1  psw, rambk0
-  st    sfr_0154
+  st    fpr
   st    $6F
   set1  psw, rambk0
   ld    $7E
@@ -1587,7 +1587,7 @@ label_0F32:
   ret
 label_0F4A:
   add   #$03
-  mov   #$00, sfr_0154
+  mov   #$00, fpr
 label_0F4F:
   push  acc
   ldc
@@ -2751,7 +2751,7 @@ label_18B7:
   .byte $53, $65, $6C, $65, $63, $74, $00, $4F, $4B, $20, $3F, $20, $20, $20, $20, $00
 
 label_196F:
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$44, trl
@@ -2999,7 +2999,7 @@ label_1B68:
 label_1B6B:
   mov   #$00, $36
   mov   #$00, $37
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -3026,7 +3026,7 @@ label_1B9A:
 label_1B9E:
   mov   #$00, $38
   mov   #$00, $39
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -3066,7 +3066,7 @@ label_1BC7:
   callf label_3A97
   ret
 label_1C01:
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -3098,7 +3098,7 @@ label_1C33:
   st    trh
   dbnz  c, label_1C2E
   ld    $54
-  st    sfr_0154
+  st    fpr
   st    $6F
   ld    $55
   st    trh
@@ -3142,7 +3142,7 @@ label_1C89:
   st    $5C
   ret
 label_1C90:
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -3179,7 +3179,7 @@ label_1CC2:
   st    trh
   ld    b
   and   #$01
-  st    sfr_0154
+  st    fpr
   st    $6F
   ld    c
   st    trl
@@ -3318,7 +3318,7 @@ label_1DE0:
   add   $56
   st    trl
   ld    $54
-  st    sfr_0154
+  st    fpr
   st    $6F
   dbnz  b, label_1DE0
   br    label_1E0C
@@ -3350,7 +3350,7 @@ label_1E32:
   pop   trh
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   pop   $61
   pop   $60
   ret
@@ -3392,7 +3392,7 @@ label_1E84:
   pop   trh
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   ret
 label_1E98:
   push  $6F
@@ -3416,7 +3416,7 @@ label_1E98:
   pop   trh
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   ret
 label_1EC9:
   push  trh
@@ -3497,7 +3497,7 @@ label_1F67:
 label_1F7B:
   push  psw
   clr1  psw, rambk0
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -3548,7 +3548,7 @@ label_1FD5:
 label_1FDD:
   push  psw
   clr1  psw, rambk0
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -3602,7 +3602,7 @@ label_2043:
   push  psw
   clr1  psw, rambk0
   ld    $54
-  st    sfr_0154
+  st    fpr
   st    $6F
   ld    $55
   st    trh
@@ -3915,7 +3915,7 @@ label_233E:
   set1  psw, rambk0
   push  trh
   push  trl
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   mov   #$FE, trh
@@ -3932,7 +3932,7 @@ label_233E:
   clr1  psw, rambk0
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   push  $6F
   push  trh
   push  trl
@@ -3980,7 +3980,7 @@ label_2395:
   pop   c
   dbnz  c, label_2395
   ld    $54
-  st    sfr_0154
+  st    fpr
   clr1  psw, rambk0
   st    $6F
   set1  psw, rambk0
@@ -4000,7 +4000,7 @@ label_2395:
   clr1  psw, rambk0
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   set1  psw, rambk0
   pop   c
   pop   b
@@ -4013,7 +4013,7 @@ label_240E:
   clr1  psw, rambk0
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   set1  psw, rambk0
   pop   c
   pop   b
@@ -4076,7 +4076,7 @@ label_2491:
   pop   $6F
   push  acc
   ld    $6F
-  st    sfr_0154
+  st    fpr
   pop   acc
   set1  psw, rambk0
   pop   b
@@ -4860,7 +4860,7 @@ label_2B18:
   mov   #$FF, acc
   ret
 label_2B1E:
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   mov   #$FE, trh
@@ -4872,7 +4872,7 @@ label_2B1E:
   st    $55
   ld    trl
   st    $56
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   mov   #$FE, trh
@@ -5316,7 +5316,7 @@ label_2ED8:
   mov   #$81, ocr
   set1  psw, rambk0
   call  label_2F7A
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   set1  psw, rambk0
@@ -5399,7 +5399,7 @@ label_2F7A:
   push  acc
   push  b
   clr1  psw, rambk0
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -5495,7 +5495,7 @@ label_303D:
   push  c
   set1  vrmad2, $00
   mov   #$00, vrmad1
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   set1  psw, rambk0
@@ -5640,7 +5640,7 @@ label_314E:
   push  $6F
   push  trh
   push  trl
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -5660,7 +5660,7 @@ label_314E:
   clr1  psw, rambk0
   pop   $6F
   ld    $6F
-  st    sfr_0154
+  st    fpr
   set1  psw, rambk0
   ld    trh
   ror
@@ -5753,7 +5753,7 @@ label_322F:
   st    vrmad2
   mov   #$03, b
   dbnz  c, label_321A
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   set1  psw, rambk0
@@ -5833,7 +5833,7 @@ label_32DD:
   st    $5C
   jmp   label_3376
 label_32EA:
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   mov   #$FE, trh
@@ -5858,7 +5858,7 @@ label_3319:
   mov   #$80, vrmad1
   set1  vrmad2, $00
   call  label_358D
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, $6F
   mov   #$FE, trh
@@ -7064,7 +7064,7 @@ label_3C12:
   mov   #$00, xbnk
   pop   ocr
   mov   #$00, $6E
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$00, trl
@@ -7156,7 +7156,7 @@ label_3CE1:
   mov   #$FF, acc
   br    label_3CDE
 label_3CE6:
-  mov   #$01, sfr_0154
+  mov   #$01, fpr
   mov   #$01, $6F
   mov   #$FE, trh
   mov   #$46, trl
@@ -7187,7 +7187,7 @@ label_3D17:
   st    trh
   dbnz  c, label_3D11
   ld    $54
-  st    sfr_0154
+  st    fpr
   st    $6F
   ld    $55
   st    trh
@@ -9042,7 +9042,7 @@ label_E348:
   mov   #$80, $00
   ld    $7D
   and   #$01
-  st    sfr_0154
+  st    fpr
   ld    $7E
   st    trh
   ld    $7F
@@ -9081,7 +9081,7 @@ label_E387:
 label_E388:
   mov   #$80, $00
   ld    $7D
-  st    sfr_0154
+  st    fpr
   ld    $7E
   st    trh
   ld    $7F
@@ -9130,7 +9130,7 @@ label_E3D7:         ; unlock SM state 0
 label_E3F6:
   mov   #$80, $00
   ld    $7D
-  st    sfr_0154
+  st    fpr
   ld    $7E
   st    trh
   ld    $7F
@@ -9779,7 +9779,7 @@ sfr_0150 EQU $0150
 sfr_0151 EQU $0151
 sfr_0152 EQU $0152
 sfr_0153 EQU $0153
-sfr_0154 EQU $0154
+fpr EQU $0154
 sfr_0155 EQU $0155
 sfr_0156 EQU $0156
 sfr_0157 EQU $0157
