@@ -1065,12 +1065,9 @@ label_0A6A:
   ret
 
   .byte $00, $00, $00, $0E, $7E, $7E, $3F, $40, $00, $05, $10, $00, $00, $0F, $41, $00
-  .byte $FF, $00, $56, $69, $73, $75, $61, $6C, $20, $4D, $65, $6D, $6F, $72, $79, $20
-  .byte $20, $20, $20, $20, $20, $20, $20, $20, $20, $20, $20, $20, $20, $20, $20, $20
-  .byte $50, $72, $6F, $64, $75, $63, $65, $64, $20, $42, $79, $20, $6F, $72, $20, $55
-  .byte $6E, $64, $65, $72, $20, $4C, $69, $63, $65, $6E, $73, $65, $20, $46, $72, $6F
-  .byte $6D, $20, $53, $45, $47, $41, $20, $45, $4E, $54, $45, $52, $50, $52, $49, $53
-  .byte $45, $53, $2C, $4C, $54, $44, $2E, $20, $20, $20, $20, $20, $7C, $00, $82, $00
+  .byte $FF, $00
+  .string 92 "Visual Memory                 Produced By or Under License From SEGA ENTERPRISES,LTD.     |"
+  .byte $82, $00
   .byte $56, $65, $72, $73, $69, $6F, $6E, $20, $31, $2E, $30, $30, $35, $2C, $31, $39
   .byte $39, $39, $2F, $31, $30, $2F, $32, $36, $2C, $33, $31, $35, $2D, $36, $32, $30
   .byte $38, $2D, $30, $35, $2C, $53, $45, $47, $41, $20, $56, $69, $73, $75, $61, $6C
@@ -2432,10 +2429,19 @@ label_15DD:
   pop   b
   ret
 
-  .byte $20, $20, $20, $20, $4A, $41, $4E, $00, $46, $45, $42, $00, $4D, $41, $52, $00
-  .byte $41, $50, $52, $00, $4D, $41, $59, $00, $4A, $55, $4E, $00, $4A, $55, $4C, $00
-  .byte $41, $55, $47, $00, $53, $45, $50, $00, $4F, $43, $54, $00, $4E, $4F, $56, $00
-  .byte $44, $45, $43, $00
+  .string 4 "    "
+  .string 4 "JAN"
+  .string 4 "FEB"
+  .string 4 "MAR"
+  .string 4 "APR"
+  .string 4 "MAY"
+  .string 4 "JUN"
+  .string 4 "JUL"
+  .string 4 "AUG"
+  .string 4 "SEP"
+  .string 4 "OCT"
+  .string 4 "NOV"
+  .string 4 "DEC"
 
 label_162B:
   clr1  p3int, $00
@@ -2743,12 +2749,16 @@ label_18B7:
   .byte $30, $18, $BC, $FA, $FE, $BC, $30, $60, $30, $18, $BC, $FA, $FE, $BC, $30, $60
   .byte $E0, $76, $3D, $FE, $7C, $38, $40, $00, $06, $1D, $FE, $7C, $3C, $4E, $02, $00
   .byte $00, $00, $00, $00, $00, $00, $00, $00, $07, $86, $91, $98, $A3, $AA, $B5, $07
-  .byte $90, $A1, $92, $A3, $94, $A5, $07, $B0, $A1, $A2, $93, $94, $85, $41, $6E, $69
-  .byte $6D, $61, $74, $65, $64, $0D, $0A, $20, $64, $69, $73, $70, $6C, $61, $79, $00
-  .byte $42, $69, $72, $64, $20, $20, $20, $20, $00, $44, $6F, $67, $20, $20, $20, $20
-  .byte $20, $00, $46, $69, $73, $68, $20, $20, $20, $20, $00, $53, $65, $74, $20, $20
-  .byte $20, $20, $20, $0D, $0A, $20, $20, $20, $63, $6C, $6F, $63, $6B, $00, $1A, $3A
-  .byte $53, $65, $6C, $65, $63, $74, $00, $4F, $4B, $20, $3F, $20, $20, $20, $20, $00
+  .byte $90, $A1, $92, $A3, $94, $A5, $07, $B0, $A1, $A2, $93, $94, $85
+
+  .string 19 "Animated\r\n display"
+  .string 9 "Bird    "
+  .string 9 "Dog     "
+  .string 9 "Fish    "
+  .string 19 "Set     \r\n   clock"
+  .byte $1A
+  .string 8 ":Select"
+  .string 9 "OK ?    "
 
 label_196F:
   mov   #$01, fpr
@@ -3672,16 +3682,32 @@ label_20BA:
   pop   psw
   ret
 
-  .byte $46, $72, $65, $65, $0D, $0A, $47, $61, $6D, $65, $00, $85, $20, $20, $20, $2F
-  .byte $20, $20, $20, $0D, $0D, $0D, $0A, $20, $20, $2F, $20, $20, $2F, $20, $20, $00
-  .byte $53, $79, $73, $74, $65, $6D, $20, $20, $0D, $0A, $20, $20, $20, $65, $72, $72
-  .byte $6F, $72, $00, $4E, $6F, $20, $73, $61, $76, $65, $64, $0D, $0A, $20, $20, $20
-  .byte $66, $69, $6C, $65, $73, $00, $46, $69, $6C, $65, $20, $69, $73, $20, $0D, $0A
-  .byte $20, $64, $61, $6D, $61, $67, $65, $64, $00, $EF, $43, $6F, $70, $79, $20, $20
-  .byte $20, $00, $EF, $44, $65, $6C, $65, $74, $65, $20, $00, $1A, $3A, $59, $65, $73
-  .byte $0D, $0A, $1B, $3A, $4E, $6F, $20, $00, $59, $65, $73, $20, $00, $20, $4E, $6F
-  .byte $20, $00, $44, $61, $74, $61, $20, $20, $20, $82, $00, $47, $61, $6D, $65, $20
-  .byte $20, $20, $82, $00, $4F, $74, $68, $65, $72, $20, $20, $82, $00
+  .string 11 "Free\r\nGame"
+  .byte $85  
+  .string 20 "   /   \r\r\r\n  /  /  "
+
+  .string 19 "System  \r\n   error"
+  .string 19 "No saved\r\n   files"
+  .string 19 "File is \r\n damaged"
+  .byte $EF
+  .string 8 "Copy   "
+  .byte $EF
+  .string 8 "Delete "
+  .byte $1A
+  .string 6 ":Yes\r\n"
+  .byte $1B
+  .string 5 ":No "
+  .string 5 "Yes "
+  .string 5 " No "
+  .string 7 "Data   "
+  .byte  $82
+  .byte  $00
+  .string 7 "Game   "
+  .byte  $82
+  .byte  $00
+  .string 7 "Other  "
+  .byte  $82
+  .byte  $00
 
 label_2162:
   inc   trl
@@ -4392,16 +4418,14 @@ label_26F8:
   pop   trh
   ret
 
-  .byte $43, $6F, $70, $79, $20, $3F, $20, $20, $00, $43, $6F, $70, $79, $69, $6E, $67
-  .byte $21, $00, $43, $6F, $70, $69, $65, $64, $20, $20, $00, $43, $6F, $70, $79, $20
-  .byte $20, $20, $20, $0D, $0A, $20, $20, $66, $61, $69, $6C, $65, $64, $00, $4E, $6F
-  .byte $74, $20, $20, $20, $20, $20, $0D, $0A, $20, $65, $6E, $6F, $75, $67, $68, $20
-  .byte $0D, $0A, $20, $20, $66, $72, $65, $65, $20, $20, $0D, $0A, $20, $20, $6D, $65
-  .byte $6D, $6F, $72, $79, $00, $53, $61, $6D, $65, $20, $20, $20, $20, $0D, $0A, $20
-  .byte $66, $69, $6C, $65, $20, $20, $20, $0D, $0A, $20, $20, $65, $78, $69, $73, $74
-  .byte $73, $00, $55, $6E, $61, $62, $6C, $65, $20, $20, $0D, $0A, $20, $74, $6F, $20
-  .byte $63, $6F, $70, $79, $00, $43, $6F, $6E, $6E, $65, $63, $74, $20, $0D, $0A, $56
-  .byte $4D, $20, $20, $20, $20, $20, $20, $00
+  .string 9 "Copy ?  "
+  .string 9 "Copying!"
+  .string 9 "Copied  "
+  .string 19 "Copy    \r\n  failed"
+  .string 39 "Not     \r\n enough \r\n  free  \r\n  memory"
+  .string 29 "Same    \r\n file   \r\n  exists"
+  .string 19 "Unable  \r\n to copy"
+  .string 19 "Connect \r\nVM      "
 
 label_27AE:
   mov   #$81, ocr
@@ -5159,10 +5183,8 @@ label_2D54:
   set1  psw, rambk0
   ret
 
-  .byte $57, $61, $69, $74, $69, $6E, $67, $20, $0D, $0A, $66, $6F, $72, $20, $64, $61
-  .byte $74, $61, $0D, $0A, $20, $20, $20, $20, $20, $20, $20, $20, $00, $52, $65, $63
-  .byte $69, $76, $69, $6E, $67, $0D, $0A, $20, $44, $6F, $20, $4E, $6F, $74, $20, $0D
-  .byte $0A, $20, $20, $55, $6E, $70, $6C, $75, $67, $00
+  .string 29 "Waiting \r\nfor data\r\n        "
+  .string 29 "Reciving\r\n Do Not \r\n  Unplug"
 
 label_2DA5:
   call  label_2E04
@@ -5901,8 +5923,8 @@ label_3376:
   pop   acc
   ret
 
-  .byte $44, $65, $6C, $65, $74, $65, $20, $3F, $00, $44, $65, $6C, $65, $74, $65, $64
-  .byte $20, $00
+  .string 9 "Delete ?"
+  .string 9 "Deleted "
 
 label_338F:
   callf label_E015
@@ -7257,9 +7279,8 @@ label_3D9F:
   mov   #$FD, acc
   ret
 
-  .byte $4E, $6F, $20, $73, $61, $76, $65, $64, $0D, $0A, $20, $20, $20, $20, $67, $61
-  .byte $6D, $65, $00, $47, $61, $6D, $65, $20, $69, $73, $20, $0D, $0A, $20, $64, $61
-  .byte $6D, $61, $67, $65, $64, $00
+.string 19 "No saved\r\n    game"
+.string 19 "Game is \r\n damaged"
 
 label_3DC9:
   push  acc
@@ -7270,25 +7291,25 @@ label_3DC9:
   clr1  psw, rambk0
   ld    $73
   bnz   label_3DE0
-  bn    btcr, $03, label_3DE0
-  clr1  btcr, $03
+  bn    btcr, $03, label_3DE0 ; if base timer irq1 not set then branch
+  clr1  btcr, $03             ; otherwise clear base timer irq1
   inc   $74
 label_3DE0:
-  bn    btcr, $01, label_3E33
-  clr1  btcr, $01
-  callf label_E02A
-  ld    p3
-  xor   #$FF
-  bnz   label_3DF5
-  ld    $70
+  bn    btcr, $01, label_3E33 ; if base timer irq0 not set then branch
+  clr1  btcr, $01             ; otherwise clear base timer irq0
+  callf label_E02A            ; 
+  ld    p3                    ; load button port, active low
+  xor   #$FF                  ; xor causes pressed buttons to be set
+  bnz   label_3DF5            ; branch if any are pressed
+  ld    $70                   ; 
   st    $72
   mov   #$00, $70
-label_3DF5:
-  ld    $6E
-  be    #$FF, label_3E2F
-  ld    p7
-  and   #$02
-  bnz   label_3E2F
+label_3DF5:                   ; branched to if button is pressed
+  ld    $6E                   ; load  battery check
+  be    #$FF, label_3E2F      ; if 0xFF skip checking for low battery
+  ld    p7                    ; load Port7
+  and   #$02                  ; bit 1 is low voltage detected
+  bnz   label_3E2F            ; branch if low voltage not detected
   inc   $6E
   ld    $6E
   be    #$06, label_3E2F
@@ -7307,10 +7328,10 @@ label_3DF5:
   push  acc
   mov   #$FF, $6E
   reti
-label_3E2F:
+label_3E2F:                   ; jumps to here after battery check?
   inc   $33
   inc   $34
-label_3E33:
+label_3E33:                   ; jumps here when base time irq0 not set
   ld    b
   st    psw
   pop   c
@@ -7322,7 +7343,7 @@ label_3E33:
   .byte $63, $D9, $63, $DA, $60, $22, $33, $01, $20, $36, $96, $31, $FF, $4B, $31, $FE
   .byte $02, $01, $F5, $20, $04, $21, $01, $F0
 
-label_3E66:
+label_3E66:                   ; p3 isr
   push  acc
   push  psw
   clr1  psw, rambk0
@@ -7406,8 +7427,9 @@ label_3EED:
   mov   #$01, $35
   jmpf  label_02EF
 
-  .byte $50, $6C, $65, $61, $73, $65, $20, $20, $0D, $0A, $20, $63, $68, $61, $6E, $67
-  .byte $65, $20, $0D, $0A, $20, $62, $61, $74, $74, $65, $72, $79, $00, $FF, $FF, $FF
+  .string 29 "Please  \r\n change \r\n battery" 
+
+  .byte $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
