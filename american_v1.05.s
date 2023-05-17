@@ -238,7 +238,7 @@ label_0294:
   callf label_1017
   clr1  vsel, $00
   clr1  vsel, $01
-  clr1  sfr_0160, $02
+  clr1  mapletxrxctl, $02
   mov   #$00, $6E
   mov   #$00, $30
   mov   #$00, $35
@@ -467,6 +467,7 @@ label_045C:
   .byte $75, $61, $6C, $0D, $0A, $20, $4D, $65, $6D, $6F, $72, $79, $0D, $0A, $20, $20
   .byte $55, $6E, $69, $74, $00
 
+; ===== MAPLE FRAME RX ENTRY POINT ======
 label_05E8:
   clr1  vsel, $00
   push  acc
@@ -476,7 +477,7 @@ label_05E8:
   push  $01
   push  $02
   push  $03
-  ld    sfr_0161
+  ld    maplesta
   and   #$76
   st    b
   bp    acc, $05, label_062F
@@ -729,7 +730,7 @@ label_07D4:
   call  label_099B
   jmp   label_07D8
 label_07D8:
-  clr1  sfr_0161, $02
+  clr1  maplesta, $02
   pop   $03
   pop   $02
   pop   $01
@@ -761,12 +762,12 @@ label_0800:
   mov   #$FC, $24
   mov   #$00, vlreg
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_081D:
   clr1  vsel, $00
-  clr1  sfr_0160, $04
+  clr1  mapletxrxctl, $04
   mov   #$00, vrmad1
   set1  vrmad2, $00
   ret
@@ -868,7 +869,7 @@ label_08B9:
   mov   #$03, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $00
   call  label_0FBF
   mov   #$06, c
 label_08E6:
@@ -877,7 +878,7 @@ label_08E6:
   mov   #$04, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $01
   call  label_0FBF
   dbnz  c, label_08E6
   clr1  vsel, $00
@@ -886,8 +887,8 @@ label_08E6:
   mov   #$01, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $01
   call  label_0FBF
   ret
 label_090F:
@@ -906,7 +907,7 @@ label_090F:
   mov   #$03, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $00
   call  label_0FBF
   mov   #$0B, c
 label_093C:
@@ -915,7 +916,7 @@ label_093C:
   mov   #$04, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $01
   call  label_0FBF
   dbnz  c, label_093C
   clr1  vsel, $00
@@ -923,8 +924,8 @@ label_093C:
   mov   #$01, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $01
   call  label_0FBF
   ret
 label_0962:
@@ -952,8 +953,8 @@ label_097B:
   mov   #$FD, $24
   mov   #$00, vlreg
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_099B:
   call  label_081D
@@ -967,8 +968,8 @@ label_099B:
   mov   #$FE, $24
   mov   #$00, vlreg
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_09BB:
   call  label_081D
@@ -1008,7 +1009,7 @@ label_09E3:
   mov   #$00, vtrbf
   mov   #$FF, vtrbf
   set1  vsel, $00
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $00
   call  label_0FBF
   mov   #$01, fpr
   mov   #$01, $6F
@@ -1019,8 +1020,8 @@ label_09E3:
   mov   #$04, b
   call  label_0F95
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $01
   ret
 label_0A38:
   mov   #$59, trl
@@ -1030,7 +1031,7 @@ label_0A38:
   mov   #$03, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $00
   call  label_0FBF
   clr1  vsel, $00
   mov   #$00, vrmad1
@@ -1038,8 +1039,8 @@ label_0A38:
   mov   #$04, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $01
   call  label_0FBF
   clr1  vsel, $00
   mov   #$00, vrmad1
@@ -1060,8 +1061,8 @@ label_0A6A:
   mov   #$02, b
   call  label_0F4A
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 
   .byte $00, $00, $00, $0E, $7E, $7E, $3F, $40, $00, $05, $10, $00, $00, $0F, $41, $00
@@ -1095,7 +1096,7 @@ label_0B7D:
   clr1  psw, rambk0
   call  label_0F79
   set1  vsel, $00
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $00
   call  label_0FBF
   set1  psw, rambk0
   ld    $7D
@@ -1122,7 +1123,7 @@ label_0BCB:
   inc   trh
 label_0BDB:
   set1  vsel, $00
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $01
   call  label_0FBF
   dbnz  c, label_0BCB
   clr1  vsel, $00
@@ -1130,8 +1131,8 @@ label_0BDB:
   mov   #$04, b
   call  label_0F95
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $01
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $01
   mov   #$00, xram_0184
   mov   #$00, xbnk
   ret
@@ -1178,8 +1179,8 @@ label_0BFE:
   ld    $1B
   st    vtrbf
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_0C58:
   call  label_0800
@@ -1433,10 +1434,10 @@ label_0E08:
   or    #$C0
   st    vtrbf
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
-label_0E3A:
+label_0E3A: ;play buzzer 
   mov   #$0A, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
@@ -1476,7 +1477,7 @@ label_0E75:
   be    #$0C, label_0EBD
   be    #$0D, label_0EC3
   be    #$09, label_0EC7
-  be    #$0E, label_0ECB
+  be    #$0E, label_0ECB ; beep
   be    #$FD, label_0ECF
   be    #$FC, label_0ED3
   be    #$FB, label_0ED7
@@ -1547,8 +1548,8 @@ label_0EDE:
   st    vtrbf
   st    vtrbf
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_0F08:
   call  label_081D
@@ -1567,8 +1568,8 @@ label_0F08:
   st    vtrbf
   st    vtrbf
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_0F32:
   mov   #$00, vtrbf
@@ -1579,8 +1580,8 @@ label_0F32:
   mov   #$07, vtrbf
   mov   #$00, vlreg
   set1  vsel, $00
-  set1  sfr_0160, $04
-  set1  sfr_0160, $00
+  set1  mapletxrxctl, $04
+  set1  mapletxrxctl, $00
   ret
 label_0F4A:
   add   #$03
@@ -1654,7 +1655,7 @@ label_0F9F:
 label_0FBF:
   push  acc
 label_0FC1:
-  ld    sfr_0161
+  ld    maplesta
   bn    acc, $00, label_0FC1
   pop   acc
   ret
@@ -1696,14 +1697,14 @@ label_0FDB:
   pop   acc
   ret
 label_1007:
-  mov   #$80, sfr_0162
+  mov   #$80, maplerst
   nop
   nop
-  mov   #$00, sfr_0162
+  mov   #$00, maplerst
   nop
   nop
   mov   #$13, vsel
-  set1  sfr_0160, $02
+  set1  mapletxrxctl, $02
   ret
 label_1017:
   mov   #$00, acc
@@ -7118,7 +7119,7 @@ label_3C5C:
   callf label_1017
   clr1  vsel, $00
   clr1  vsel, $01
-  clr1  sfr_0160, $02
+  clr1  mapletxrxctl, $02
   mov   #$02, $30
   call  label_3686
   jmpf  label_02EF
@@ -7394,7 +7395,7 @@ label_3EA7:
   callf label_1007
   callf label_1017
 label_3ECB:
-  ld    sfr_0161
+  ld    maplesta
   bp    acc, $06, label_3EE2
   ld    p7
   xor   #$FF
@@ -7420,7 +7421,7 @@ label_3EED:
   set1  p3int, $00
   clr1  vsel, $00
   clr1  vsel, $01
-  clr1  sfr_0160, $02
+  clr1  mapletxrxctl, $02
   mov   #$A3, ocr
   mov   #$00, $6E
   mov   #$00, $30
@@ -9813,9 +9814,9 @@ p7 EQU $015C
 i01cr EQU $015D
 i23cr EQU $015E
 isl EQU $015F
-sfr_0160 EQU $0160
-sfr_0161 EQU $0161
-sfr_0162 EQU $0162
+mapletxrxctl EQU $0160
+maplesta EQU $0161
+maplerst EQU $0162
 vsel EQU $0163
 vrmad1 EQU $0164
 vrmad2 EQU $0165
