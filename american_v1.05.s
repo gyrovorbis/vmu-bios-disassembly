@@ -716,7 +716,7 @@ label_07AF:
   call  label_0827
   ld    $29
   bne   #$08, label_07CE
-  call  label_0E3A
+  call  label_0E3A  ; Play maple buzzer
   jmp   label_07D8
 label_07CA:
   call  label_0800
@@ -1437,21 +1437,22 @@ label_0E08:
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_0E3A: ;play buzzer 
+; Maple Buzzer/Beep playback routine
+label_0E3A:
   mov   #$0A, vrmad1
   clr1  vrmad2, $00
-  ld    vtrbf
+  ld    vtrbf         ; Grab duty
   st    b
-  ld    vtrbf
+  ld    vtrbf         ; Grab pitch
   st    c
-  mov   #$00, t1cnt
-  mov   #$FF, acc
+  mov   #$00, t1cnt   ; Stop T1
+  mov   #$FF, acc     ; T1LR = FF - pitch number
   sub   c
   st    t1lr
-  add   b
+  add   b             ; T1LC = (FF - pitch number) + duty
   st    t1lc
-  mov   #$50, t1cnt
-  call  label_081D
+  mov   #$50, t1cnt   ; T1L on, pulse on
+  call  label_081D    ; Maple-related calls
   call  label_0F32
   ret
 label_0E5D:
@@ -1516,7 +1517,7 @@ label_0EC7:
   call  label_0E08
   br    label_0EDD
 label_0ECB:
-  call  label_0E3A
+  call  label_0E3A  ; Play maple buzzer
   br    label_0EDD
 label_0ECF:
   call  label_097B
@@ -7105,11 +7106,12 @@ label_3C46:
 label_3C4B:
   call  label_3CE6
   bnz   label_3C7A
-  mov   #$A3, ocr
-  mov   #$7F, sp
-  set1  psw, rambk0
-  not1  ext, $00
-  jmpf  $00
+; Start GAME from flash, calling RESET interrupt
+  mov   #$A3, ocr    ; Initialize clock (Quartz, /6)
+  mov   #$7F, sp     ; Initialize stack
+  set1  psw, rambk0  ; Swap to RAM bank 1
+  not1  ext, $00     ; Swap to executing from Flash
+  jmpf  $00          ; Jump to user's reset ISR
 label_3C5C:
   mov   #$A3, ocr
   mov   #$7F, sp
