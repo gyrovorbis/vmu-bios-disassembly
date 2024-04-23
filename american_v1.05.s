@@ -65,7 +65,7 @@
 
   ;; P3 ISR
   .org $004B
-  callf label_3E66
+  callf P3_IRQ_Vector
   reti
 ;; ========== END INTERRUPT VECTOR TABLE ==========
 label_004F:
@@ -268,10 +268,10 @@ label_02C2:
   mov   #$00, $6E
   mov   #$00, $30
   mov   #$00, $35
-label_02EF:
-  clr1  psw, rambk0
-  clr1  p3int, $00
-  ld    p7
+label_02EF: ; lots of locations calls here, looks like a big deal
+  clr1  psw, rambk0    ; BIOS RAM
+  clr1  p3int, $00     ; P3 interrupts off
+  ld    p7             ; get port 7 and isolate the 5V detect pin
   and   #$01
   bnz   label_0337
   ld    $31
@@ -285,7 +285,7 @@ label_02EF:
   set1  p3int, $00
   mov   #$01, $33
   mov   #$00, $34
-label_0317:
+label_0317: ; 
   set1  pcon, $00
   ld    p7
   and   #$01
@@ -302,8 +302,10 @@ label_0317:
 label_0333:
   call  label_0421
   br    label_0317
+
 label_0337:
   jmpf  label_3EA7
+
 label_033A:
   ld    $70
   and   #$10
@@ -740,6 +742,8 @@ label_07D8:
   pop   acc
   set1  vsel, $00
   ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 label_07EB:
   mov   #$02, vrmad1
   clr1  vrmad2, $00
@@ -751,6 +755,8 @@ label_07EB:
   ld    $20
   sub   b
   ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 label_0800:
   call  label_081D
   mov   #$00, vtrbf
@@ -765,12 +771,18 @@ label_0800:
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_081D:
-  clr1  vsel, $00
-  clr1  mapletxrxctl, $04
-  mov   #$00, vrmad1
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+label_081D: ; set WRAM to reply a MAPLE packet, called from around 20 locals
+  clr1  vsel, $00          ; WRAM is set to be accessed by CPU
+  clr1  mapletxrxctl, $04  ; no idea
+  mov   #$00, vrmad1       ; set address to $100
   set1  vrmad2, $00
   ret
+
+
+
+
 label_0827:
   mov   #$05, vrmad1
   clr1  vrmad2, $00
@@ -1413,12 +1425,14 @@ label_0DBD:
 label_0E05:
   call  label_0800
   ret
-label_0E08:
-  call  label_081D
-  mov   #$02, vtrbf
-  ld    $20
-  st    vtrbf
-  ld    $21
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+label_0E08: ; Maple get VMU buttons routine
+  call  label_081D     ; set WRAM to reply mode
+  mov   #$02, vtrbf    ; this block replies to the Dreamcast with the following data
+  ld    $20            ; $02, $20, $21, $08
+  st    vtrbf          ; $08, $00, $00, $00
+  ld    $21            ; $00, $00, $00, [raw buttons & $C0]
   st    vtrbf
   mov   #$08, vtrbf
   mov   #$02, vlreg
@@ -1430,15 +1444,16 @@ label_0E08:
   st    vtrbf
   st    vtrbf
   st    vtrbf
-  ld    p3
-  or    #$C0
+  ld    p3             ; take P3 as-is (no debounce huh?)
+  or    #$C0           ; remove SLEEP and MODE buttons
   st    vtrbf
-  set1  vsel, $00
-  set1  mapletxrxctl, $04
+  set1  vsel, $00          ; set WRAM to send mode back
+  set1  mapletxrxctl, $04  ; do god knows what maple things these registers do
   set1  mapletxrxctl, $00
   ret
-; Maple Buzzer/Beep playback routine
-label_0E3A:
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+label_0E3A: ; Maple Buzzer/Beep playback routine
   mov   #$0A, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf         ; Grab duty
@@ -1455,6 +1470,8 @@ label_0E3A:
   call  label_081D    ; Maple-related calls
   call  label_0F32
   ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 label_0E5D:
   mov   #$02, xbnk
   mov   #$00, xram_0184
@@ -6317,31 +6334,36 @@ label_362C:
   .byte $F8, $4E, $F8, $07, $D8, $4E, $03, $5C, $E1, $01, $90, $06, $02, $70, $E1, $30
   .byte $90, $EE, $A0
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 label_3662:
-  set1  p3int, $00
-  set1  pcon, $00
-  clr1  p3int, $00
-  ld    p7
+  set1  p3int, $00 ; enable P3 IRQ
+  set1  pcon, $00  ; halt
+  clr1  p3int, $00 ; now disable it again
+  ld    p7         ; check the 5V detect pin
   and   #$01
-  bnz   label_3674
-  ld    $70
-  and   #$0F
-  bnz   label_3662
-label_3674:
+  bnz   .Still_In  ; 1 = VMU is inserted in the controller
+  ld    Buttons_Current
+  and   #%00001111
+  bnz   label_3662 ; loop untill the player is not holding any Dpad direction
+.Still_In:
   ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 label_3675:
-  set1  p3int, $00
-  set1  pcon, $00
-  clr1  p3int, $00
-  ld    p7
+  set1  p3int, $00 ; enable P3 IRQ
+  set1  pcon, $00  ; halt
+  clr1  p3int, $00 ; disable P3 again
+  ld    p7         ; check the 5V detect pin
   and   #$01
-  bnz   label_3685
-  ld    $70
+  bnz   .Still_In ; 1 = VMU is inserted in the controller
+  ld    Buttons_Current
   bnz   label_3675
-label_3685:
+.Still_In:
   ret
-label_3686:
-  set1  psw, rambk0
+  
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+Clear_User_RAM: ; simply sets the whole USER RAM to zero
+  set1  psw, rambk0 ; set to USER bank
   mov   #$00, $00
 label_368B:
   mov   #$00, @R0
@@ -6350,6 +6372,8 @@ label_368B:
   bnz   label_368B
   clr1  psw, rambk0
   ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 label_3696:
   push  b
   push  psw
@@ -7123,7 +7147,7 @@ label_3C5C:
   clr1  vsel, $01
   clr1  mapletxrxctl, $02
   mov   #$02, $30
-  call  label_3686
+  call  Clear_User_RAM
   jmpf  label_02EF
 label_3C7A:
   clr1  p3int, $00
@@ -7152,7 +7176,7 @@ label_3CA8:
   be    #$FD, label_3CB2
   br    label_3CA8
 label_3CB2:
-  call  label_3686
+  call  Clear_User_RAM
   jmpf  label_02EF
   label_3CB7:
   call  label_3B79      ; enable flash save icon 
@@ -7346,49 +7370,60 @@ label_3E33:                   ; jumps here when base time irq0 not set
   .byte $63, $D9, $63, $DA, $60, $22, $33, $01, $20, $36, $96, $31, $FF, $4B, $31, $FE
   .byte $02, $01, $F5, $20, $04, $21, $01, $F0
 
-label_3E66:                   ; p3 isr
+
+
+
+
+P3_IRQ_Vector: ; handle buttons and do something with RAM $30 and $33
   push  acc
   push  psw
   clr1  psw, rambk0
   mov   #$01, $33
-  ld    $70
-  st    $72
-  ld    p3
-  xor   #$FF
-  st    $70
-  xor   $72
-  and   $70
-  st    $71
-  and   #$40
-  bz    label_3E98
+  ld    Buttons_Current
+  st    Buttons_Last
+  ld    p3                 ; get buttons
+  xor   #$FF               ; invert them to make it so 0 = released
+  st    Buttons_Current
+  xor   Buttons_Last       ; set only keys that have changed their states
+  and   Buttons_Current    ; if the state changed to "0", mask it out and only keep rising edge differences
+  st    Buttons_Diff
+  and   #%01000000         ; check for MODE key and this part with $30 checks
+  bz    .Check_Sleep
   inc   $30
   ld    $30
-  be    #$02, label_3E98
-  bp    psw, cy, label_3E98
-  bne   #$03, label_3E95
+  be    #$02, .Check_Sleep
+  bp    psw, cy, .Check_Sleep
+  bne   #$03, .Set30To2
   mov   #$00, $30
-  br    label_3E98
-label_3E95:
+  br    .Check_Sleep
+.Set30To2:
   mov   #$02, $30
-label_3E98:
-  ld    $71
-  and   #$80
-  bz    label_3EA0
+.Check_Sleep:
+  ld    Buttons_Diff
+  and   #%10000000          ; check for SLEEP key, flip this weird bit if it's pressed
+  bz    .exit
   not1  $35, $00
-label_3EA0:
+.exit:
   clr1  p3int, $01
   pop   psw
   pop   acc
   ret
+
+
+
+
+
+
+
 label_3EA7:
   clr1  p3int, $00
   call  label_3BA9
   clr1  psw, rambk0
   mov   #$FF, $6E
-  mov   #$A2, ocr
+  mov   #%10100010, ocr ; 5KHz, RC off
   nop
   nop
-  mov   #$92, ocr
+  mov   #%10010010, ocr ; 1MHz, RC off
   mov   #$AD, p1ddr
   mov   #$BF, p1fcr
   set1  p1, $06
@@ -7416,7 +7451,7 @@ label_3EE2:
 label_3EED:
   mov   #$80, p1ddr
   mov   #$BF, p1fcr
-  callf label_3686
+  callf Clear_User_RAM
   mov   #$FF, t1lr
   mov   #$FF, t1lc
   mov   #$00, t1cnt
@@ -7424,7 +7459,7 @@ label_3EED:
   clr1  vsel, $00
   clr1  vsel, $01
   clr1  mapletxrxctl, $02
-  mov   #$A3, ocr
+  mov   #%10100010, ocr ; 5KHz, RC off
   mov   #$00, $6E
   mov   #$00, $30
   mov   #$01, $35
@@ -9709,6 +9744,12 @@ label_E4E1:
 
   ;; Pad size of binary
   .cnop $00, $0200
+
+  ;; RAM definitions
+Buttons_Current  = $70
+Buttons_Last     = $71
+Buttons_Diff     = $72
+
 
   ;; PSW bits
 p EQU $00
