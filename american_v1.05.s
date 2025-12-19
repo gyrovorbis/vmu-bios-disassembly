@@ -44,7 +44,7 @@
 
   ;; SIO0 (Serial Port 0) ISR
   .org $0033
-  callf label_25E4
+  callf HandleIntSIO0
   reti
 
   .byte $FF, $FF, $FF, $FF
@@ -278,13 +278,13 @@ label_02EF: ; lots of locations calls here, looks like a big deal
   bz    label_02AF
   callf label_3BA9
   mov   #$C7, trl
-  mov   #$05, trh
+  mov   #$05, trh     ; Load string "Visual Memory Unit"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   mov   #$01, $33
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_0317: ; 
   set1  pcon, $00
   ld    p7
@@ -310,9 +310,9 @@ label_033A:
   ld    $70
   and   #$10
   bnz   label_035E
-  ld    $34
+  ld    SerialTimeout
   bz    label_0317
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
@@ -328,9 +328,9 @@ label_0360:
   ld    $70
   and   #$10
   bnz   label_0384
-  ld    $34
+  ld    SerialTimeout
   bz    label_0317
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
@@ -346,9 +346,9 @@ label_0387:
   ld    $70
   and   #$10
   bnz   label_03AB
-  ld    $34
+  ld    SerialTimeout
   bz    label_0317
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
@@ -370,7 +370,7 @@ label_03AE:
   mov   #$00, xbnk
   pop   ocr
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$00, trl
   mov   #$10, b
@@ -385,10 +385,10 @@ label_03E1:
   clr1  p3int, $00
   callf label_3C07
   mov   #$0E, trl
-  mov   #$04, trh
+  mov   #$04, trh   ; Load string "Format memory"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   mov   #$01, $33
 label_03FA:
@@ -636,7 +636,7 @@ label_070C:
   inc   $00
   dbnz  b, label_070C
   clr1  psw, rambk0
-  mov   #$00, $25
+  mov   #$00, NBytesToVerify
   mov   #$00, $27
   call  label_0858
   call  label_0B7D
@@ -995,7 +995,7 @@ label_09BB:
   mov   #$07, vlreg
   mov   #$00, acc
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$00, trl
   mov   #$10, b
@@ -1010,7 +1010,7 @@ label_09E3:
   mov   #$02, b
   call  label_0F4A
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$47, trl
   ldf
@@ -1024,7 +1024,7 @@ label_09E3:
   set1  mapletxrxctl, $00
   call  label_0FBF
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$48, trl
   clr1  vsel, $00
@@ -1114,7 +1114,7 @@ label_0B7D:
   ld    $7D
   clr1  psw, rambk0
   st    fpr
-  st    $6F
+  st    FlashBankTemp
   set1  psw, rambk0
   ld    $7E
   st    trh
@@ -1247,13 +1247,13 @@ label_0C8D:
   set1  psw, rambk0
   ld    $75
   clr1  psw, rambk0
-  st    $26
+  st    NBytesToSend
   mov   #$00, $27
 label_0CBF:
   set1  psw, rambk0
   ld    $75
   clr1  psw, rambk0
-  sub   $26
+  sub   NBytesToSend
   bz    label_0CCB
   set1  $27, $02
 label_0CCB:
@@ -1754,7 +1754,7 @@ label_1034:
 label_104D:
   call  label_10CA
   mov   #$01, $33
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   mov   #$80, $35
 label_1058:
   callf label_3696
@@ -1789,7 +1789,7 @@ label_108D:
   jmp   label_104D
 label_1099:
   call  label_112E
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   mov   #$01, $33
   mov   #$80, $35
 label_10A4:
@@ -1966,11 +1966,11 @@ label_11FB:
 label_11FF:
   clr1  p3int, $00
   mov   #$1C, trl
-  mov   #$19, trh
+  mov   #$19, trh     ; Load string "Animated display"
   mov   #$00, $67
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
 label_1213:
   clr1  p3int, $00
   ld    $32
@@ -1978,28 +1978,28 @@ label_1213:
   bz    label_1226
   be    #$40, label_122E
   mov   #$2F, trl
-  mov   #$19, trh
+  mov   #$19, trh     ; Load string "Bird"
   br    label_1234
 label_1226:
   mov   #$38, trl
-  mov   #$19, trh
+  mov   #$19, trh     ; Load string "Dog"
   br    label_1234
 label_122E:
   mov   #$41, trl
-  mov   #$19, trh
+  mov   #$19, trh     ; Load string "Fish"
 label_1234:
   mov   #$00, $60
   mov   #$03, $61
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   ret
 label_1240:
   mov   #$4A, trl
-  mov   #$19, trh
+  mov   #$19, trh     ; Load string "Set clock"(?)
   mov   #$00, $67
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   ret
 label_1253:
   mov   #$20, $10
@@ -2106,7 +2106,7 @@ label_1329:
   br    label_1323
 label_132E:
   callf label_3675
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_1334:
   callf label_3718
   mov   #$00, $1D
@@ -2154,7 +2154,7 @@ label_1394:
   ret
 label_1395:
   callf label_3675
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_139B:
   callf label_3718
   mov   #$00, $1D
@@ -2214,7 +2214,7 @@ label_1409:
   br    label_139B
 label_140D:
   callf label_3675
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_1413:
   callf label_3718
   mov   #$00, $1D
@@ -2322,7 +2322,7 @@ label_14F0:
   jmp   label_1413
 label_14F4:
   callf label_3675
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_14FA:
   callf label_3718
   mov   #$00, $1D
@@ -2352,7 +2352,7 @@ label_1531:
   ret
 label_1532:
   callf label_3675
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_1538:
   callf label_3718
   mov   #$00, $1D
@@ -2383,7 +2383,7 @@ label_156F:
 label_1570:
   callf label_3675
   mov   #$00, b
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_1579:
   callf label_3696
   mov   #$00, $1D
@@ -2516,10 +2516,10 @@ label_1681:
   mov   #$01, $61
   call  label_15AB
   mov   #$5D, trl
-  mov   #$19, trh
+  mov   #$19, trh     ; Load string ":Select"
   mov   #$00, $60
   mov   #$03, $61
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   ret
 label_16AF:
@@ -2627,10 +2627,10 @@ label_179E:
   mov   #$01, xbnk
   callf label_3BCD
   mov   #$5D, trl
-  mov   #$19, trh
+  mov   #$19, trh   ; Load string ":Select"
   mov   #$00, $60
   mov   #$03, $61
-  callf label_3A05
+  callf DrawString
   mov   #$05, $60
   mov   #$00, $61
   mov   #$0C, acc
@@ -2648,10 +2648,10 @@ label_17DC:
   mov   #$05, $60
   callf label_39A1
   mov   #$66, trl
-  mov   #$19, trh
+  mov   #$19, trh   ; Load string "OK ?"
   mov   #$00, $60
   mov   #$02, $61
-  callf label_3A05
+  callf DrawString
   mov   #$00, acc
   callf label_1F47
   set1  p3int, $00
@@ -2781,7 +2781,7 @@ label_18B7:
 
 label_196F:
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$44, trl
   mov   #$00, $5C
@@ -2837,10 +2837,10 @@ label_19D5:
 label_19DB:
   clr1  p3int, $00
   mov   #$E5, trl
-  mov   #$20, trh
+  mov   #$20, trh   ; Load string "System error"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   mov   #$01, xbnk
   callf label_3BCD
   ld    $5C
@@ -2858,7 +2858,7 @@ label_1A08:
   call  label_1BC7
   set1  p3int, $00
   mov   #$00, $3C
-  mov   #$01, $3D
+  mov   #$01, NBlocksToWrite
   mov   #$01, $33
 label_1A17:
   set1  pcon, $00
@@ -2915,22 +2915,22 @@ label_1A7B:
 label_1A7E:
   jmp   label_1B68
 label_1A80:
-  inc   $3D
-  ld    $3D
+  inc   NBlocksToWrite
+  ld    NBlocksToWrite
   sub   $3B
   bne   #$01, label_1A8C
-  mov   #$01, $3D
+  mov   #$01, NBlocksToWrite
 label_1A8C:
   clr1  p3int, $00
   call  label_1D10
   set1  p3int, $00
   br    label_1A5E
 label_1A94:
-  dec   $3D
-  ld    $3D
+  dec   NBlocksToWrite
+  ld    NBlocksToWrite
   bnz   label_1A9E
   ld    $3B
-  st    $3D
+  st    NBlocksToWrite
 label_1A9E:
   clr1  p3int, $00
   call  label_1D10
@@ -3003,10 +3003,10 @@ label_1B30:
 label_1B33:
   clr1  p3int, $00
   mov   #$F8, trl
-  mov   #$20, trh
+  mov   #$20, trh   ; Load string "No saved files"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   mov   #$01, xbnk
   callf label_3BCD
   mov   #$01, $33
@@ -3029,10 +3029,10 @@ label_1B6B:
   mov   #$00, $36
   mov   #$00, $37
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
-  mov   #$46, trl
-  call  label_1CC2
+  mov   #$46, trl   ; Read FAT First (0x1FE46)
+  call  PrepareFlashBlockRead
   mov   #$C8, c
 label_1B82:
   ldf
@@ -3052,35 +3052,44 @@ label_1B94:
 label_1B9A:
   dbnz  c, label_1B82
   ret
-label_1B9E:
+
+;; POST:
+;; NFreeBlocks=number of free game blocks
+;;
+;; Counts free blocks at the start of the volume
+;; Probably only used to count available blocks for storing a game
+;; because game data is written from the start of the volume and non-game data written from the end
+.org $1B9E
+CountFreeGameBlocks:
   mov   #$00, $38
-  mov   #$00, $39
+  mov   #$00, NFreeBlocks
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
-  mov   #$46, trl
-  call  label_1CC2
-  mov   #$80, c
-label_1BB5:
-  ldf
-  bne   #$FC, label_1BC6
+  mov   #$46, trl               ; Read FAT First within the root block (0x1FE46)
+  call  PrepareFlashBlockRead   ; Load address of FAT into (fpr, trh, trl)
+  mov   #$80, c                 ; Count down from $80 (maximum size of the game region / 1st flash bank)
+.CheckNextBlock:
+  ldf                           ; Check for *free block* (0xfffc, little endian)
+  bne   #$FC, .DoneCounting
   inc   trl
   ldf
-  bne   #$FF, label_1BC6
+  bne   #$FF, .DoneCounting
   inc   trl
-  inc   $39
-  dbnz  c, label_1BB5
-label_1BC6:
+  inc   NFreeBlocks             ; Found a free block.
+  dbnz  c, .CheckNextBlock
+.DoneCounting:
   ret
+
 label_1BC7:
   mov   #$00, $60
   mov   #$00, $61
   callf label_3C07
   mov   #$C5, trl
-  mov   #$20, trh
-  callf label_3A05
+  mov   #$20, trh   ; Load string "Free ..."
+  callf DrawString
   call  label_1B6B
-  call  label_1B9E
+  call  CountFreeGameBlocks
   call  label_1C90
   mov   #$36, $00
   callf label_351A
@@ -3096,10 +3105,10 @@ label_1BC7:
   ret
 label_1C01:
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   st    $54
   ld    trh
   st    $55
@@ -3107,7 +3116,7 @@ label_1C01:
   st    $56
   mov   #$FE, trh
   mov   #$4A, trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   ld    $52
   st    $58
   mov   #$00, $3A
@@ -3128,7 +3137,7 @@ label_1C33:
   dbnz  c, label_1C2E
   ld    $54
   st    fpr
-  st    $6F
+  st    FlashBankTemp
   ld    $55
   st    trh
   ld    $56
@@ -3159,7 +3168,7 @@ label_1C79:
   ldf
   bnz   label_1C89
   dec   trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   ld    $52
   st    $58
   br    label_1C2B
@@ -3172,13 +3181,13 @@ label_1C89:
   ret
 label_1C90:
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   mov   #$90, trl
   inc   trh
-  mov   #$00, $3E
+  mov   #$00, NBytesToReceive
   mov   #$00, $3F
   mov   #$1F, b
 label_1CAC:
@@ -3194,36 +3203,47 @@ label_1CBA:
   inc   trl
   dbnz  b, label_1CAC
   ret
-label_1CC2:
+
+;; PRE:
+;; (FPR0, trh, trl): Address of a block ID in the FAT
+;;
+;; POST:
+;; (FPR0, trh, trl): Address of the file content
+;; acc: MSB of the file content address (same as FPR0)
+.org $1CC2
+PrepareFlashBlockRead:
   push  b
   push  c
   push  psw
   clr1  psw, rambk0
-  ldf
+  ldf                 ; Read FAT Block ID
   st    b
   st    $52
   mov   #$02, acc
   mov   #$00, c
+; Multiply block ID (stored in b) by FAT block size 0x200 (stored in acc, c)
+; This translates the block ID to the address of the file content
   mul
-  st    trh
+  st    trh           ; Store a8-a15 of file content address to trh
   ld    b
   and   #$01
-  st    fpr
-  st    $6F
+  st    fpr           ; Store a16 of file content address to FPR0
+  st    FlashBankTemp ; Store a16 to a temp also
   ld    c
-  st    trl
-  ld    $6F
+  st    trl           ; Store a0-a7 of file content address to trl
+  ld    FlashBankTemp
   pop   psw
   pop   c
   pop   b
   ret
+
 label_1CED:
   push  acc
   mov   #$D0, trl
-  mov   #$20, trh
+  mov   #$20, trh     ; Read string "   /   ", probably file data would be filled into the blanks later.
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   mov   #$3A, $00
   callf label_351A
   mov   #$52, $00
@@ -3300,8 +3320,8 @@ label_1D97:
   mov   #$00, $60
   mov   #$01, $61
   mov   #$F8, trl
-  mov   #$20, trh
-  callf label_3A05
+  mov   #$20, trh   ; Load string "No saved files"
+  callf DrawString
   ld    $5C
   or    #$02
   st    $5C
@@ -3312,7 +3332,7 @@ label_1D97:
 label_1DB7:
   push  $60
   push  $61
-  push  $6F
+  push  FlashBankTemp
   push  trh
   push  trl
   mov   #$00, $60
@@ -3348,7 +3368,7 @@ label_1DE0:
   st    trl
   ld    $54
   st    fpr
-  st    $6F
+  st    FlashBankTemp
   dbnz  b, label_1DE0
   br    label_1E0C
 label_1E06:
@@ -3360,7 +3380,7 @@ label_1E0C:
   ldf
   bnz   label_1E41
   dec   trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   mov   #$02, b
   mov   #$00, $61
 label_1E1B:
@@ -3377,8 +3397,8 @@ label_1E21:
 label_1E32:
   pop   trl
   pop   trh
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
   pop   $61
   pop   $60
@@ -3387,8 +3407,8 @@ label_1E41:
   mov   #$00, $60
   mov   #$00, $61
   mov   #$0B, trl
-  mov   #$21, trh
-  callf label_3A05
+  mov   #$21, trh   ; Load string "File is damaged"
+  callf DrawString
   ld    $5C
   or    #$01
   st    $5C
@@ -3397,7 +3417,7 @@ label_1E41:
   callf label_3AD6
   br    label_1E32
 label_1E61:
-  push  $6F
+  push  FlashBankTemp
   push  trh
   push  trl
   ldf
@@ -3412,19 +3432,19 @@ label_1E76:
   br    label_1E84
 label_1E7E:
   mov   #$50, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "Game"
 label_1E84:
   mov   #$00, $60
   mov   #$03, $61
-  callf label_3A05
+  callf DrawString
   pop   trl
   pop   trh
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
   ret
 label_1E98:
-  push  $6F
+  push  FlashBankTemp
   push  trh
   push  trl
   ld    trl
@@ -3443,8 +3463,8 @@ label_1E98:
   callf label_3A97
   pop   trl
   pop   trh
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
   ret
 label_1EC9:
@@ -3456,8 +3476,8 @@ label_1EC9:
   mov   #$00, $60
   mov   #$02, $61
   mov   #$30, trl
-  mov   #$21, trh
-  callf label_3A05
+  mov   #$21, trh   ; Load string " :Yes"
+  callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
@@ -3468,15 +3488,17 @@ label_1EEB:
   clr1  p3int, $00
   mov   #$FF, $67
   mov   #$1E, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "Copy"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   mov   #$00, $67
   mov   #$27, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "Delete".
+  ; Note that certain "control characters" like 0xEF precede the string in some cases
+  ; Maybe these indicate that a special icon should be drawn at the position
   mov   #$01, $61
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
@@ -3486,15 +3508,15 @@ label_1F19:
   push  trl
   clr1  p3int, $00
   mov   #$1E, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "Copy"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   mov   #$27, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "Delete"
   mov   #$FF, $67
   mov   #$01, $61
-  callf label_3A05
+  callf DrawString
   mov   #$00, $67
   set1  p3int, $00
   pop   trl
@@ -3507,18 +3529,18 @@ label_1F47:
   mov   #$FF, $67
 label_1F50:
   mov   #$3D, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "Yes"
   mov   #$00, $60
   mov   #$03, $61
-  callf label_3A05
+  callf DrawString
   mov   #$00, $67
   bnz   label_1F67
   mov   #$FF, $67
 label_1F67:
   mov   #$42, trl
-  mov   #$21, trh
+  mov   #$21, trh   ; Load string "No"
   mov   #$04, $60
-  callf label_3A05
+  callf DrawString
   mov   #$00, $67
   pop   trl
   pop   trh
@@ -3527,10 +3549,10 @@ label_1F7B:
   push  psw
   clr1  psw, rambk0
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   st    $54
   ld    trh
   st    $55
@@ -3538,7 +3560,7 @@ label_1F7B:
   st    $56
   mov   #$FE, trh
   mov   #$4A, trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   ld    $52
   st    $58
   mov   #$00, b
@@ -3551,7 +3573,7 @@ label_1FA9:
   br    label_1FBA
 label_1FB2:
   inc   b
-  ld    $3D
+  ld    NBlocksToWrite
   sub   b
   bz    label_1FD2
 label_1FBA:
@@ -3578,10 +3600,10 @@ label_1FDD:
   push  psw
   clr1  psw, rambk0
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  call  label_1CC2
+  call  PrepareFlashBlockRead
   st    $54
   ld    trh
   st    $55
@@ -3589,7 +3611,7 @@ label_1FDD:
   st    $56
   mov   #$FE, trh
   mov   #$4A, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   ld    $52
   st    $58
 label_2006:
@@ -3632,7 +3654,7 @@ label_2043:
   clr1  psw, rambk0
   ld    $54
   st    fpr
-  st    $6F
+  st    FlashBankTemp
   ld    $55
   st    trh
   ld    $56
@@ -3663,7 +3685,7 @@ label_207E:
   ldf
   bnz   label_208F
   dec   trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   ld    $52
   st    $58
 label_208C:
@@ -3762,7 +3784,7 @@ label_219F:
 label_21A3:
   jmpf  label_1AEB
 label_21A6:
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   ld    p7
   and   #$09
   bne   #$08, label_21B2
@@ -3804,10 +3826,10 @@ label_21F3:
   mov   #$01, xbnk
   callf label_3BCD
   mov   #$88, trl
-  mov   #$27, trh
+  mov   #$27, trh      ; Read string "Unable to copy"
   mov   #$00, $60
   mov   #$00, $61
-  callf label_3A05
+  callf DrawString
   pop   trl
   pop   trh
   callf label_3675
@@ -3824,7 +3846,7 @@ label_2229:
 label_222C:
   mov   #$81, ocr
   mov   #$FF, $2B
-  call  label_25A7
+  call  InitializeSerialIO
   mov   #$00, $60
   mov   #$02, $61
   clr1  p3int, $00
@@ -3833,8 +3855,8 @@ label_222C:
   push  trh
   push  trl
   mov   #$1F, trl
-  mov   #$27, trh
-  callf label_3A05
+  mov   #$27, trh     ; Read string "Copying!"
+  callf DrawString
   pop   trl
   pop   trh
   mov   #$00, sbuf1
@@ -3845,27 +3867,27 @@ label_222C:
   inc   $00
   mov   #$02, @R0
   inc   $00
-  ldf
+  ldf                 ; Read file Type (Directory 0x00) https://vmu.falcogirgis.net/filesystem.html#fs_dir
   st    @R0
   inc   $00
   push  trl
   ld    trl
   add   #$18
   st    trl
-  ldf
+  ldf                 ; Read file block count (Directory 0x18)
   pop   trl
   st    @R0
   st    $24
   inc   $00
   mov   #$FF, @R0
-  mov   #$04, b
+  mov   #$04, b       ; Number of bytes to send
   mov   #$10, $00
   mov   #$28, $01
-  call  label_24E2
-  bnz   label_2307
-  call  label_254E
-  bnz   label_2307
-  call  label_2579
+  call  SerialTxMultiple
+  bnz   FailTransfer
+  call  VerifyDataPostTx
+  bnz   FailTransfer
+  call  CheckPeerReadyToReceiveMessage
   bne   #$0A, label_2294
   jmp   label_2332
 label_2294:
@@ -3892,17 +3914,17 @@ label_22AC:
   mov   #$0E, b
   mov   #$10, $00
   mov   #$28, $01
-  call  label_24E2
-  bnz   label_2307
-  call  label_254E
-  bnz   label_2307
-  call  label_2579
+  call  SerialTxMultiple
+  bnz   FailTransfer
+  call  VerifyDataPostTx
+  bnz   FailTransfer
+  call  CheckPeerReadyToReceiveMessage
   set1  scon1, $01
   be    #$0A, label_2338
   call  label_233E
-  bnz   label_2307
+  bnz   FailTransfer
   call  label_2426
-  bnz   label_2307
+  bnz   FailTransfer
   clr1  psw, rambk0
   call  label_2688
 label_22DF:
@@ -3923,13 +3945,14 @@ label_22FE:
 label_2301:
   mov   #$00, $2B
   jmpf  label_196F
-label_2307:
+FailTransfer:
   ld    p7
   and   #$09
-  bne   #$08, label_232C
-  call  label_2579
-  be    #$0A, label_232C
-  mov   #$10, $00
+  bne   #$08, .Fail   ; Other VMU not connected. Skip sending a message.
+  call  CheckPeerReadyToReceiveMessage
+  be    #$0A, .Fail   ; Other VMU not ready to receive a message. Skip sending it.
+  ; Write message 0x10, 0xb, 0x0, 0xff into DataToTransmit array
+  mov   #DataToTransmit, $00
   mov   #$10, @R0
   inc   $00
   mov   #$0B, @R0
@@ -3937,12 +3960,13 @@ label_2307:
   mov   #$00, @R0
   inc   $00
   mov   #$FF, @R0
-  mov   #$10, $00
-  mov   #$28, $01
-  call  label_24E2
-label_232C:
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
+  ; Send the failure message to the other VMU
+  call  SerialTxMultiple
+.Fail:
   clr1  psw, rambk0
-  call  label_26A4
+  call  IndicateCopyFailed  ; Display failure message on the local VMU
   br    label_22DF
 label_2332:
   clr1  psw, rambk0
@@ -3956,16 +3980,16 @@ label_233E:
   push  b
   push  c
   clr1  psw, rambk0
-  push  $6F
+  push  FlashBankTemp
   set1  psw, rambk0
   push  trh
   push  trl
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $54
   ld    trh
@@ -3975,10 +3999,10 @@ label_233E:
   pop   trl
   pop   trh
   clr1  psw, rambk0
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
-  push  $6F
+  push  FlashBankTemp
   push  trh
   push  trl
   ld    trl
@@ -3986,7 +4010,7 @@ label_233E:
   st    trl
 label_2381:
   clr1  psw, rambk0
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $7D
   ld    trh
@@ -4008,13 +4032,13 @@ label_2395:
   inc   $00
   mov   #$FF, @R0
   mov   #$03, b
-  call  label_2579
+  call  CheckPeerReadyToReceiveMessage
   be    #$0A, label_240E
   mov   #$10, $00
   mov   #$28, $01
-  call  label_24E2
+  call  SerialTxMultiple
   bnz   label_240E
-  call  label_254E
+  call  VerifyDataPostTx
   bnz   label_240E
   ld    $7F
   add   #$80
@@ -4027,7 +4051,7 @@ label_2395:
   ld    $54
   st    fpr
   clr1  psw, rambk0
-  st    $6F
+  st    FlashBankTemp
   set1  psw, rambk0
   ld    $7D
   and   #$01
@@ -4043,8 +4067,8 @@ label_2395:
   pop   trl
   pop   trh
   clr1  psw, rambk0
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
   set1  psw, rambk0
   pop   c
@@ -4056,8 +4080,8 @@ label_240E:
   pop   trl
   pop   trh
   clr1  psw, rambk0
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
   set1  psw, rambk0
   pop   c
@@ -4067,7 +4091,7 @@ label_240E:
 label_2426:
   push  b
   clr1  psw, rambk0
-  push  $6F
+  push  FlashBankTemp
   set1  psw, rambk0
   push  trh
   push  trl
@@ -4088,13 +4112,13 @@ label_2446:
   dbnz  b, label_2446
   mov   #$FF, @R0
   mov   #$0E, b
-  call  label_2579
+  call  CheckPeerReadyToReceiveMessage
   be    #$0A, label_24A6
   mov   #$10, $00
   mov   #$28, $01
-  call  label_24E2
+  call  SerialTxMultiple
   bnz   label_24A6
-  call  label_254E
+  call  VerifyDataPostTx
   bnz   label_24A6
   mov   #$10, $00
   mov   #$10, @R0
@@ -4105,22 +4129,22 @@ label_2446:
   inc   $00
   mov   #$FF, @R0
   mov   #$03, b
-  call  label_2579
+  call  CheckPeerReadyToReceiveMessage
   be    #$0A, label_24A6
   mov   #$10, $00
   mov   #$28, $01
-  call  label_24E2
+  call  SerialTxMultiple
   bnz   label_24A6
-  call  label_254E
+  call  VerifyDataPostTx
   bnz   label_24A6
   mov   #$00, acc
 label_2491:
   pop   trl
   pop   trh
   clr1  psw, rambk0
-  pop   $6F
+  pop   FlashBankTemp
   push  acc
-  ld    $6F
+  ld    FlashBankTemp
   st    fpr
   pop   acc
   set1  psw, rambk0
@@ -4139,11 +4163,11 @@ label_24AB:
   inc   $00
   mov   #$04, @R0
   mov   #$82, b
-  call  label_2579
+  call  CheckPeerReadyToReceiveMessage
   be    #$0A, label_24DD
   mov   #$7E, $00
   mov   #$7E, $01
-  call  label_24E2
+  call  SerialTxMultiple
   bnz   label_24DD
   call  label_2560
   bnz   label_24DD
@@ -4156,70 +4180,94 @@ label_24D6:
 label_24DD:
   mov   #$FF, acc
   br    label_24D6
-label_24E2:
-  mov   #$01, $26
+
+;; PRE:
+;; b: number of bytes to send
+;; r0: pointer to data to transmit
+;; r1: pointer to data we finished transmitting
+;; - scon1, 3 (transfer start) should be set already
+;;
+;; POST:
+;; acc: ff on failure, 0 on success
+;;
+;; Note: SIO0 interrupt is generally enabled while SIO1 interrupt is disabled when this is used
+.org $24E2
+SerialTxMultiple:
+  mov   #$01, NBytesToSend
   clr1  psw, rambk0
-  mov   #$00, $34
+  mov   #$00, SerialTimeout     ; Reset SerialTimeout to 0
   set1  psw, rambk0
-  set1  scon1, $03
-  call  label_25D3
-label_24F0:
-  set1  pcon, $00
+  set1  scon1, $03              ; Begin receiving
+  call  SerialTxOneByte         ; Send the first byte in @R0
+.WaitForRx:
+  set1  pcon, $00               ; Enter halt mode
   push  psw
   clr1  psw, rambk0
-  ld    $34
+  ld    SerialTimeout           ; Check serial timeout
   pop   psw
-  be    #$06, label_254A
-  bn    psw, cy, label_254A
-  ld    p7
+  be    #$06, .ErrReturn
+  bn    psw, cy, .ErrReturn     ; Fail if SerialTimeout >= 6
+  ld    p7                      ; Check if other VMU connected
   and   #$09
-  bne   #$08, label_254A
-  bn    scon1, $01, label_24F0
+  bne   #$08, .ErrReturn        ; Fail if other VMU not connected
+  bn    scon1, $01, .WaitForRx  ; Keep waiting if rx not finished
   clr1  scon1, $01
-  ld    sbuf1
-  bne   #$E0, label_254A
-  inc   $00
-  ld    b
-  dec   $01
-  st    $26
-  st    $25
-  mov   #$00, sbuf1
-  clr1  scon1, $01
-  set1  scon1, $03
-  call  label_25D3
-  inc   $00
+  ld    sbuf1                   ; Load received data
+  bne   #$E0, .ErrReturn        ; Fail if received something besides $E0 from other VMU
+  inc   $00                     ; Inc tx data pointer (preparing to send rest of data)
+  ld    b                       ; Load number of bytes to send
+  dec   $01                     ; Dec pointer to data we finished transmitting (why??)
+  st    NBytesToSend            ; Store number of bytes we will send
+  st    NBytesToVerify          ; Store number of bytes we will verify after sending
+  mov   #$00, sbuf1             ; Clear rx data
+  clr1  scon1, $01              ; Clear receive end flag
+  set1  scon1, $03              ; Start receiving again
+  call  SerialTxOneByte         ; Send the next byte
+  inc   $00                     ; Inc tx data pointer
   clr1  psw, rambk0
-  mov   #$00, $34
+  mov   #$00, SerialTimeout     ; Reset serial timeout
   set1  psw, rambk0
-label_252D:
+.WaitToSendNextByte:
   set1  pcon, $00
   clr1  psw, rambk0
-  ld    $34
+  ld    SerialTimeout           ; Check serial timeout
   set1  psw, rambk0
-  be    #$06, label_254A
-  bn    psw, cy, label_254A
-  ld    p7
+  be    #$06, .ErrReturn
+  bn    psw, cy, .ErrReturn     ; Fail if SerialTimeout >= 6
+  ld    p7                      ; Check if other VMU connected
   and   #$09
-  bne   #$08, label_254A
-  ld    $26
-  bnz   label_252D
+  bne   #$08, .ErrReturn        ; Fail if other VMU not connected
+  ld    NBytesToSend            ; Check if we have more bytes to send (note that 'HandleIntSIO0' decrements this)
+  bnz   .WaitToSendNextByte
   mov   #$00, acc
   ret
-label_254A:
+.ErrReturn:
   mov   #$FF, acc
   ret
-label_254E:
+
+;; PRE:
+;; - Psw,1 is set (Ram bank 1 is being used)
+;; - NBytesToVerify contains how far we should seek
+;; POST:
+;; - acc=0: Success
+;; - acc!=0: Failure
+;;
+;; Verify that the data we intended to transmit (stored at $10)
+;; is the same as the data we actually transmitted (stored at $28)
+.org $254E
+VerifyDataPostTx:
   mov   #$10, $00
   mov   #$28, $01
-label_2554:
+.VerifyOneByte:
   ld    @R0
   xor   @R1
-  bnz   label_255F
+  bnz   .End                ; Failure case (acc!=0)
   inc   $00
   inc   $01
-  dbnz  $25, label_2554
-label_255F:
+  dbnz  NBytesToVerify, .VerifyOneByte ; Verify next byte, or success case (acc=0)
+.End:
   ret
+
 label_2560:
   mov   #$7E, $00
   mov   #$50, acc
@@ -4234,42 +4282,53 @@ label_2560:
 label_2575:
   mov   #$FF, acc
   ret
-label_2579:
+
+;; Postconditions:
+;; - acc=0: Happy case
+;; - acc=0xa: Sad case
+CheckPeerReadyToReceiveMessage:
   push  psw
-  clr1  psw, rambk0
-  mov   #$00, $34
-label_2580:
-  ld    $34
-  be    #$06, label_259A
-  bn    psw, cy, label_259A
-  bn    scon1, $01, label_2580
-  clr1  scon1, $01
+  clr1  psw, rambk0             ; Use ram bank 0
+  mov   #$00, SerialTimeout
+.Wait:
+  ld    SerialTimeout
+  be    #$06, .Fail
+  bn    psw, cy, .Fail          ; Fail if !(timeout < 6)
+  bn    scon1, $01, .Wait       ; Keep waiting if receive end flag not set
+  clr1  scon1, $01              ; Finished receiving. Clear the end flag
   ld    sbuf1
-  bz    label_2580
-  bne   #$0C, label_259A
+  bz    .Wait                   ; We received zero. Wait to receive another serial byte.
+  bne   #$0C, .Fail             ; Received unexpected value. Assume peer is not ready.
   pop   psw
   mov   #$00, acc
   ret
-label_259A:
+.Fail:
   pop   psw
   mov   #$0A, acc
   ret
-label_25A0:
-  set1  pcon, $00
-  ld    $26
-  bnz   label_25A0
+
+;; Called to wait for interrupt-driven, multi-byte SIO0 transfer to complete.
+.org $25A0
+WaitUntilAllBytesSent:
+  set1  pcon, $00             ; Enter halt mode
+  ld    NBytesToSend
+  bnz   WaitUntilAllBytesSent ; Repeat if still have bytes to send
   ret
-label_25A7:
-  mov   #$F8, sbr
-  mov   #$40, p1
+
+;; Setup a bunch of registers to prepare to perform serial I/O.
+.org $25A7
+InitializeSerialIO:
+  mov   #$F8, sbr     ; Set baud rate
+  mov   #$40, p1      ; Enable SO1 data output
   mov   #$8D, p1fcr
   mov   #$8D, p1ddr
-  mov   #$04, scon0
+  mov   #$04, scon0   ; Use MSB first transmit order
   mov   #$00, sbuf0
-  mov   #$04, scon1
+  mov   #$04, scon1   ; Use MSB first receive order
   mov   #$00, sbuf1
   mov   #$FF, $6E
   ret
+
 label_25C3:
   mov   #$40, p1
   mov   #$80, p1ddr
@@ -4277,42 +4336,52 @@ label_25C3:
   mov   #$00, ip
   mov   #$00, $6E
   ret
-label_25D3:
-  clr1  scon0, $01
-  ld    @R0
-  st    sbuf0
-  set1  scon0, $00
-  mov   #$16, acc
-label_25DD:
+
+;; PRE:
+;; R0: Pointer to data to send
+;;
+;; POST:
+;; Have started (but not completed) transmitting
+.org $25D3
+SerialTxOneByte:
+  clr1  scon0, $01    ; Clear transfer end flag
+  ld    @R0           ; Read data to send
+  st    sbuf0         ; Store in transmit buffer
+  set1  scon0, $00    ; Enable SIO0 interrupt
+  mov   #$16, acc     ; Busy wait
+.BusyWait:
   nop
-  dbnz  acc, label_25DD
-  set1  scon0, $03
+  dbnz  acc, .BusyWait
+  set1  scon0, $03    ; Done waiting, start transfer
   ret
-label_25E4:
+
+.org $25E4
+HandleIntSIO0:
   push  acc
-  clr1  scon0, $01
-  ld    sbuf0
+  clr1  scon0, $01        ; Clear transfer end flag
+  ld    sbuf0             ; Load transmitted data
   push  psw
-  set1  psw, rambk0
-  st    @R1
-  inc   $01
-  dbnz  $26, label_25FB
+  set1  psw, rambk0       ; Use main memory bank 1
+  st    @R1               ; Store the data we transmitted
+  inc   $01               ; Inc transmitted data pointer
+  dbnz  NBytesToSend, .MoreBytesToSend
   pop   psw
-  clr1  scon0, $00
+  clr1  scon0, $00        ; Disable SIO0 interrupt
   pop   acc
   ret
-label_25FB:
-  mov   #$0E, acc
-label_25FE:
+.MoreBytesToSend:
+  mov   #$0E, acc         ; Delay before starting next transfer
+.BusyWait:
   nop
-  dbnz  acc, label_25FE
-  ld    @R0
+  dbnz  acc, .BusyWait
+  ld    @R0               ; Read the next byte to transmit
   st    sbuf0
-  inc   $00
-  set1  scon0, $03
+  inc   $00               ; Inc tx data pointer
+  set1  scon0, $03        ; Start transmitting
   pop   psw
   pop   acc
   ret
+
 label_260E:
   push  acc
   clr1  scon1, $01
@@ -4322,7 +4391,7 @@ label_260E:
   set1  psw, rambk0
   st    @R1
   inc   $01
-  dbnz  $3E, label_2623
+  dbnz  NBytesToReceive, label_2623
   mov   #$04, scon1
 label_2623:
   pop   psw
@@ -4361,10 +4430,10 @@ label_2656:
   mov   #$04, c
   dbnz  b, label_2656
   mov   #$16, trl
-  mov   #$27, trh
+  mov   #$27, trh   ; Load string "Copy ?"
   mov   #$00, $60
   mov   #$02, $61
-  callf label_3A05
+  callf DrawString
   mov   #$00, acc
   callf label_1F47
   set1  p3int, $00
@@ -4376,27 +4445,30 @@ label_2688:
   push  trl
   clr1  p3int, $00
   mov   #$00, $60
-  mov   #$02, $61
+  mov   #$02, $61   ; Load string "Copied  "
   mov   #$28, trl
   mov   #$27, trh
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_26A4:
+
+.org $26A4
+IndicateCopyFailed:
   push  trh
   push  trl
-  clr1  p3int, $00
+  clr1  p3int, $00  ; Disable P3 interrupt
   mov   #$00, $60
   mov   #$02, $61
   mov   #$31, trl
-  mov   #$27, trh
-  callf label_3A05
-  set1  p3int, $00
+  mov   #$27, trh   ; Load string "Copy failed"
+  callf DrawString
+  set1  p3int, $00  ; Enable P3 interrupt
   pop   trl
   pop   trh
   ret
+
 label_26C0:
   push  trh
   push  trl
@@ -4404,8 +4476,8 @@ label_26C0:
   mov   #$00, $60
   mov   #$00, $61
   mov   #$44, trl
-  mov   #$27, trh
-  callf label_3A05
+  mov   #$27, trh   ; Load string "Not enough free memory"
+  callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
@@ -4417,8 +4489,8 @@ label_26DC:
   mov   #$00, $60
   mov   #$01, $61
   mov   #$6B, trl
-  mov   #$27, trh
-  callf label_3A05
+  mov   #$27, trh   ; Load string "Same file exists"
+  callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
@@ -4429,10 +4501,10 @@ label_26F8:
   mov   #$01, xbnk
   callf label_3BCD
   mov   #$9B, trl
-  mov   #$27, trh
+  mov   #$27, trh   ; Load string "Connect VM"
   mov   #$00, $60
   mov   #$02, $61
-  callf label_3A05
+  callf DrawString
   pop   trl
   pop   trh
   ret
@@ -4449,10 +4521,10 @@ label_26F8:
 label_27AE:
   mov   #$81, ocr
   call  label_2628
-  call  label_2D32
+  call  IndicateWaitingForData
   callf label_1B6B
-  callf label_1B9E
-  call  label_25A7
+  callf CountFreeGameBlocks
+  call  InitializeSerialIO
   mov   #$E0, sbr
   clr1  psw, rambk0
   mov   #$40, $35
@@ -4461,7 +4533,7 @@ label_27AE:
   mov   #$28, $01
   mov   #$20, ip
   mov   #$00, sbuf1
-  set1  scon1, $03
+  set1  scon1, $03      ; Start receiving
 label_27D4:
   callf label_36D8
   be    #$FD, label_2800
@@ -4470,20 +4542,20 @@ label_27D4:
   ld    $70
   pop   psw
   be    #$30, label_27F9
-  ld    p7
+  ld    p7              ; Check other VMU still connected
   and   #$09
   bne   #$08, label_27FE
   ld    sbuf1
   bz    label_27D4
   and   #$F0
   be    #$10, label_2802
-  set1  scon1, $03
+  set1  scon1, $03      ; Start receiving
   br    label_27D4
 label_27F9:
   clr1  psw, rambk0
   mov   #$FF, $2B
 label_27FE:
-  jmp   label_2938
+  jmp   SerialTeardown
 label_2800:
   jmp   label_2923
 label_2802:
@@ -4495,21 +4567,21 @@ label_2802:
   inc   acc
   st    $3F
   inc   acc
-  st    $3E
-  call  label_2D54
+  st    NBytesToReceive
+  call  IndicateReceiving
   mov   #$10, $00
   mov   #$E0, @R0
-  mov   #$01, $26
-  callf label_25D3
-  callf label_25A0
-  mov   #$28, $01
+  mov   #$01, NBytesToSend
+  callf SerialTxOneByte
+  callf WaitUntilAllBytesSent
+  mov   #DataToTransmit, $01
   mov   #$0D, scon1
 label_282A:
   set1  pcon, $00
-  ld    p7
+  ld    p7                    
   and   #$09
   bne   #$08, label_27FE
-  ld    $3E
+  ld    NBytesToReceive
   bnz   label_282A
   mov   #$28, $01
   ld    @R1
@@ -4519,19 +4591,19 @@ label_282A:
   st    $60
   inc   $01
   ld    @R1
-  st    $3D
+  st    NBlocksToWrite
   st    $78
   mov   #$00, $79
   ld    $60
   clr1  psw, rambk0
-  bne   #$CC, label_2858
-  ld    $39
+  bne   #$CC, label_2858    ; Branch if not a game file
+  ld    NFreeBlocks
   br    label_285A
 label_2858:
   ld    $37
 label_285A:
   set1  psw, rambk0
-  be    $3D, label_286B
+  be    NBlocksToWrite, label_286B
   bn    psw, cy, label_286B
 label_2862:
   mov   #$0A, acc
@@ -4542,7 +4614,7 @@ label_286B:
   call  label_2CCE
   call  label_2953
   bz    label_2873
-  jmp   label_2938
+  jmp   SerialTeardown
 label_2873:
   mov   #$28, $01
   ld    @R1
@@ -4565,7 +4637,7 @@ label_2893:
   bnz   label_28D3
   call  label_2953
   bz    label_289D
-  jmp   label_2938
+  jmp   SerialTeardown
 label_289D:
   mov   #$28, $01
   ld    @R1
@@ -4576,7 +4648,7 @@ label_28A6:
   call  label_2A29
   call  label_2953
   bz    label_28B0
-  jmp   label_2938
+  jmp   SerialTeardown
 label_28B0:
   mov   #$28, $01
   ld    @R1
@@ -4603,7 +4675,7 @@ label_28D3:
   clr1  psw, rambk0
   jmp   label_27AE
 label_28DE:
-  jmp   label_2938
+  jmp   SerialTeardown
 label_28E0:
   clr1  ie, $07
   call  label_2FCF
@@ -4648,17 +4720,20 @@ label_2923:
   mov   #$00, $35
   mov   #$01, $33
   jmpf  label_1B68
-label_2938:
+
+.org $2938
+SerialTeardown:
   clr1  psw, rambk0
   set1  p3int, $00
   call  label_25C3
   mov   #$02, xbnk
-  mov   #$00, xram_0184
+  mov   #$00, xram_0184 ; clear flash icon
   mov   #$A3, ocr
   mov   #$01, $33
   mov   #$00, $35
   mov   #$00, $30
   jmpf  label_196F
+
 label_2953:
   mov   #$0C, acc
   call  label_2CB8
@@ -4700,10 +4775,10 @@ label_2997:
   call  label_2D02
   ld    $60
   be    #$CC, label_29A7
-  dbnz  $3D, label_2991
+  dbnz  NBlocksToWrite, label_2991
   br    label_29AA
 label_29A7:
-  dbnz  $3D, label_298B
+  dbnz  NBlocksToWrite, label_298B
 label_29AA:
   mov   #$00, acc
   pop   c
@@ -4905,10 +4980,10 @@ label_2B18:
 label_2B1E:
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
-  mov   #$46, trl
-  callf label_1CC2
+  mov   #$46, trl             ; Read FAT First block ID (0xFE46)
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $54
   ld    trh
@@ -4917,10 +4992,10 @@ label_2B1E:
   st    $56
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$4A, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
 label_2B4E:
   mov   #$10, b
@@ -4938,7 +5013,7 @@ label_2B51:
   and   #$FE
   st    vrmad1
   clr1  psw, rambk0
-  ld    $6F
+  ld    FlashBankTemp
   set1  psw, rambk0
   st    vrmad2
   ld    vtrbf
@@ -4966,7 +5041,7 @@ label_2B92:
   ld    trh
   st    $7E
   clr1  psw, rambk0
-  ld    $6F
+  ld    FlashBankTemp
   set1  psw, rambk0
   st    $7D
   callf label_E027
@@ -5073,20 +5148,20 @@ label_2C57:
   inc   acc
   st    $3F
   inc   acc
-  st    $3E
+  st    NBytesToReceive
   mov   #$10, $00
   mov   #$E0, @R0
-  mov   #$01, $26
-  callf label_25D3
-  callf label_25A0
-  mov   #$28, $01
-  mov   #$0D, scon1
-label_2C7B:
+  mov   #$01, NBytesToSend
+  callf SerialTxOneByte
+  callf WaitUntilAllBytesSent   ; Clear transfer end flag
+  mov   #$28, $01           ; Read data to send
+  mov   #$0D, scon1         ; Store in transmit buffer
+label_2C7B:   ; Enable SIO0 interrupt
   set1  pcon, $00
   ld    p7
   and   #$09
   bne   #$08, label_2C8C
-  ld    $3E
+  ld    NBytesToReceive
   bnz   label_2C7B
   mov   #$00, acc
   ret
@@ -5094,38 +5169,38 @@ label_2C8C:
   mov   #$FF, acc
   ret
 label_2C90:
-  mov   #$82, $3E
+  mov   #$82, NBytesToReceive
   mov   #$81, $3F
   mov   #$10, $00
   mov   #$E0, @R0
-  mov   #$01, $26
-  callf label_25D3
-  callf label_25A0
-  mov   #$7F, $01
-  mov   #$0D, scon1
-label_2CAA:
+  mov   #$01, NBytesToSend
+  callf SerialTxOneByte
+  callf WaitUntilAllBytesSent   ; Clear transfer end flag
+  mov   #$7F, $01           ; Read data to send
+  mov   #$0D, scon1         ; Store in transmit buffer
+label_2CAA:   ; Enable SIO0 interrupt
   set1  pcon, $00
   ld    p7
   and   #$09
   bne   #$08, label_2C8C
-  ld    $3E
+  ld    NBytesToReceive
   bnz   label_2CAA
   ret
 label_2CB8:
   mov   #$10, $00
   mov   #$28, $01
   st    @R0
-  mov   #$01, $26
-  callf label_25D3
-  callf label_25A0
-  mov   #$28, $01
-  set1  scon1, $03
-  ret
+  mov   #$01, NBytesToSend
+  callf SerialTxOneByte
+  callf WaitUntilAllBytesSent   ; Clear transfer end flag
+  mov   #$28, $01           ; Read data to send
+  set1  scon1, $03          ; Store in transmit buffer
+  ret   ; Enable SIO0 interrupt
 label_2CCE:
   push  b
   mov   #$01, xbnk
   mov   #$C0, $02
-  ld    $3D
+  ld    NBlocksToWrite
   add   #$03
   st    b
 label_2CDC:
@@ -5176,7 +5251,8 @@ label_2D22:
 
   .byte $23, $00, $FF, $20, $1F, $47, $71, $04, $71, $05, $A0
 
-label_2D32:
+.org $2D32
+IndicateWaitingForData:
   push  trh
   push  trl
   clr1  p3int, $00
@@ -5184,25 +5260,29 @@ label_2D32:
   mov   #$00, $60
   mov   #$00, $61
   mov   #$6B, trl
-  mov   #$2D, trh
-  callf label_3A05
-  callf label_3B95
+  mov   #$2D, trh   ; Load string "Waiting for data"
+  callf DrawString
+  callf DisableFlashIcon
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_2D54:
+
+.org $2D54
+IndicateReceiving:
   clr1  psw, rambk0
   mov   #$00, $60
   mov   #$00, $61
   mov   #$88, trl
-  mov   #$2D, trh
-  callf label_3A05
-  callf label_3B79
+  mov   #$2D, trh   ; Load string "Reciving Do Not Unplug"
+  callf DrawString
+  callf EnableFlashIcon
   set1  psw, rambk0
   ret
 
+.org $2D6B
   .string 29 "Waiting \r\nfor data\r\n        "
+.org $2D88
   .string 29 "Reciving\r\n Do Not \r\n  Unplug"
 
 label_2DA5:
@@ -5237,14 +5317,14 @@ label_2DD5:
 label_2DE3:
   call  label_2E51
   mov   #$FF, $6E
-  callf label_3B79
+  callf EnableFlashIcon
   call  label_2ED8
   call  label_2E73
   mov   #$00, $6E
-  callf label_3B95
-  ld    $3D
+  callf DisableFlashIcon
+  ld    NBlocksToWrite
   be    #$01, label_2DFC
-  dec   $3D
+  dec   NBlocksToWrite
 label_2DFC:
   jmpf  label_1A34
 label_2DFF:
@@ -5273,10 +5353,10 @@ label_2E1F:
   mov   #$04, c
   dbnz  b, label_2E1F
   mov   #$7D, trl
-  mov   #$33, trh
+  mov   #$33, trh   ; Load string "Delete ?"
   mov   #$00, $60
   mov   #$02, $61
-  callf label_3A05
+  callf DrawString
   mov   #$00, acc
   callf label_1F47
   set1  p3int, $00
@@ -5290,10 +5370,10 @@ label_2E51:
   mov   #$01, xbnk
   callf label_3BCD
   mov   #$86, trl
-  mov   #$33, trh
+  mov   #$33, trh   ; Load string "Deleted "
   mov   #$00, $60
   mov   #$02, $61
-  callf label_3A05
+  callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
@@ -5359,7 +5439,7 @@ label_2ED8:
   call  label_2F7A
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   set1  psw, rambk0
   mov   #$03, acc
   add   trl
@@ -5441,10 +5521,10 @@ label_2F7A:
   push  b
   clr1  psw, rambk0
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $54
   ld    trh
@@ -5456,7 +5536,7 @@ label_2F7A:
   mov   #$04, b
 label_2FA7:
   clr1  psw, rambk0
-  ld    $6F
+  ld    FlashBankTemp
   set1  psw, rambk0
   st    $7D
   ld    trh
@@ -5492,7 +5572,7 @@ label_2FD7:
   bnz   label_300E
 label_2FEE:
   clr1  psw, rambk0
-  ld    $6F
+  ld    FlashBankTemp
   set1  psw, rambk0
   st    $54
   clr1  psw, cy
@@ -5538,7 +5618,7 @@ label_303D:
   mov   #$00, vrmad1
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   set1  psw, rambk0
   mov   #$FE, trh
   mov   #$46, trl
@@ -5631,7 +5711,7 @@ label_30E8:
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   clr1  psw, rambk0
-  ld    $6F
+  ld    FlashBankTemp
   set1  psw, rambk0
   st    $7D
   ld    trh
@@ -5678,14 +5758,14 @@ label_314E:
   st    $7E
   dbnz  b, label_3115
   clr1  psw, rambk0
-  push  $6F
+  push  FlashBankTemp
   push  trh
   push  trl
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $7D
   ld    trh
@@ -5699,8 +5779,8 @@ label_314E:
   pop   trl
   pop   trh
   clr1  psw, rambk0
-  pop   $6F
-  ld    $6F
+  pop   FlashBankTemp
+  ld    FlashBankTemp
   st    fpr
   set1  psw, rambk0
   ld    trh
@@ -5796,7 +5876,7 @@ label_322F:
   dbnz  c, label_321A
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   set1  psw, rambk0
   mov   #$FE, trh
   mov   #$4A, trl
@@ -5876,10 +5956,10 @@ label_32DD:
 label_32EA:
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $7D
   ld    trh
@@ -5901,10 +5981,10 @@ label_3319:
   call  label_358D
   mov   #$01, fpr
   clr1  psw, rambk0
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $54
   st    $7D
@@ -5988,10 +6068,10 @@ label_33E6:
   mov   #$FF, t1lc
   mov   #$FE, t1lr
   mov   #$50, t1cnt
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_33FD:
   set1  pcon, $00
-  ld    $34
+  ld    SerialTimeout
   be    #$03, label_33FD
   bp    psw, cy, label_33FD
 label_3407:
@@ -6006,10 +6086,10 @@ label_3413:
   mov   #$FF, t1lc
   mov   #$FE, t1lr
   mov   #$50, t1cnt
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
 label_3424:
   set1  pcon, $00
-  ld    $34
+  ld    SerialTimeout
   bnz   label_3407
   br    label_3424
 label_342C:
@@ -6398,9 +6478,9 @@ label_36A0:
   ld    $70
   and   #$08
   bnz   label_36D3
-  ld    $34
+  ld    SerialTimeout
   bz    label_36A0
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   ld    $70
   and   #$01
   bnz   label_36D3
@@ -6428,9 +6508,9 @@ label_36E2:
   ld    $70
   and   #$20
   bnz   label_3715
-  ld    $34
+  ld    SerialTimeout
   bz    label_36E2
-  mov   #$00, $34
+  mov   #$00, SerialTimeout
   ld    $70
   and   #$01
   bnz   label_3715
@@ -6838,7 +6918,12 @@ label_39FE:
   pop   b
   pop   acc
   ret
-label_3A05:
+
+;; PRE:
+;; trh, trl: address of a null terminated string to draw on the screen.
+;; $60, $61: Maybe these are X/Y tile positions for where to draw the string?
+.org $3A05
+DrawString:
   push  acc
   push  b
   push  trh
@@ -7016,24 +7101,28 @@ label_3B6E:
 label_3B76:
   add   #$30
   ret
+
 ; ==== ENABLE FLASH SAVE ICON ======
-label_3B79:
+.org $3B79
+EnableFlashIcon:
   push  acc
   push  ocr
   ld    ocr
-  be    #$81, label_3B85
+  be    #$81, .Skip
   mov   #$81, ocr           ; set clock mode to control flash
-label_3B85:
+.Skip:
   mov   #$02, xbnk
-  mov   #$01, xram_0184     ; set flash read icon to active 
-label_3B8B:
+  mov   #$01, xram_0184     ; set flash read icon to active
+FlashEpilogue:
   pop   ocr
   ld    ocr                 ; restore previous clock state
-  be    #$81, label_3B92    
-label_3B92:
+  be    #$81, .End
+.End:
   pop   acc
   ret
-label_3B95:
+
+.org $3B95
+DisableFlashIcon:
   push  acc
   push  ocr
   ld    ocr
@@ -7042,7 +7131,8 @@ label_3B95:
 label_3BA1:
   mov   #$02, xbnk
   mov   #$00, xram_0184
-  br    label_3B8B
+  br    FlashEpilogue
+
 label_3BA9:
   push  b
   call  label_3C07
@@ -7113,7 +7203,7 @@ label_3C12:
   pop   ocr
   mov   #$00, $6E
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$00, trl
   mov   #$10, b
@@ -7156,19 +7246,19 @@ label_3C7A:
   be    #$FE, label_3C8F
   be    #$FD, label_3C97
   mov   #$0E, trl
-  mov   #$04, trh
+  mov   #$04, trh   ; Load string "Format memory"
   br    label_3C9D
 label_3C8F:
   mov   #$A3, trl
-  mov   #$3D, trh
+  mov   #$3D, trh   ; Load string "No saved game"
   br    label_3C9D
 label_3C97:
   mov   #$B6, trl
-  mov   #$3D, trh
+  mov   #$3D, trh   ; Load string "Game is damaged"
 label_3C9D:
   mov   #$00, $60
   mov   #$00, $61
-  call  label_3A05
+  call  DrawString
   mov   #$01, $33
 label_3CA8:
   call  label_3696
@@ -7179,7 +7269,7 @@ label_3CB2:
   call  Clear_User_RAM
   jmpf  label_02EF
   label_3CB7:
-  call  label_3B79      ; enable flash save icon 
+  call  EnableFlashIcon      ; enable flash save icon 
   ld    $7D             ; start address
   bnz   label_3CE1      ; disable flash save icon
   push  psw             ; save entry PSW
@@ -7199,18 +7289,18 @@ label_3CB2:
   mov   #$00, acc
 ; === DISABLE FLASH SAVE ICON =====
 label_3CDE:
-  call  label_3B95
+  call  DisableFlashIcon
   ret
 label_3CE1:
   mov   #$FF, acc
   br    label_3CDE
 label_3CE6:
   mov   #$01, fpr
-  mov   #$01, $6F
+  mov   #$01, FlashBankTemp
   mov   #$FE, trh
-  mov   #$46, trl
-  callf label_1CC2
-  ld    $6F
+  mov   #$46, trl               ; Load FAT First (0x1FE46)
+  callf PrepareFlashBlockRead
+  ld    FlashBankTemp
   st    $54
   ld    trh
   st    $55
@@ -7218,7 +7308,7 @@ label_3CE6:
   st    $56
   mov   #$FE, trh
   mov   #$4A, trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   ld    $52
   st    $58
 label_3D0E:
@@ -7237,7 +7327,7 @@ label_3D17:
   dbnz  c, label_3D11
   ld    $54
   st    fpr
-  st    $6F
+  st    FlashBankTemp
   ld    $55
   st    trh
   ld    $56
@@ -7268,7 +7358,7 @@ label_3D5D:
   ldf
   bnz   label_3D9B
   dec   trl
-  callf label_1CC2
+  callf PrepareFlashBlockRead
   ld    $52
   st    $58
   br    label_3D0E
@@ -7342,12 +7432,12 @@ label_3DF5:                   ; branched to if button is pressed
   be    #$06, label_3E2F
   bp    psw, cy, label_3E2F
   mov   #$16, trl
-  mov   #$3F, trh
+  mov   #$3F, trh             ; Load string "Please change battery"
   mov   #$00, $67
   mov   #$00, $60
   mov   #$00, $61
   callf label_3C07
-  call  label_3A05
+  call  DrawString
   mov   #$7F, sp
   mov   #$3E, acc
   push  acc
@@ -7357,7 +7447,7 @@ label_3DF5:                   ; branched to if button is pressed
   reti
 label_3E2F:                   ; jumps to here after battery check?
   inc   $33
-  inc   $34
+  inc   SerialTimeout
 label_3E33:                   ; jumps here when base time irq0 not set
   ld    b
   st    psw
@@ -9746,10 +9836,29 @@ label_E4E1:
   .cnop $00, $0200
 
   ;; RAM definitions
+  ;; Bank 0
+  ;;
+;; NOTE: Not all usages of this address seem related to this task.
+;; It might be reasonable to define multiple symbols for the same address, to distinguish different usages/meanings of the address
+NBytesToVerify   = $25
+
+NBytesToSend     = $26
+
+SerialTimeout    = $34
+NFreeBlocks      = $39
+NBlocksToWrite   = $3D
+NBytesToReceive  = $3E
+RxPayloadSize    = $3F
+
+FlashBankTemp    = $6F
 Buttons_Current  = $70
 Buttons_Last     = $71
 Buttons_Diff     = $72
 
+  ;; Bank 1
+  ;;
+DataToTransmit   = $10
+DataTransmitted  = $28
 
   ;; PSW bits
 p EQU $00
