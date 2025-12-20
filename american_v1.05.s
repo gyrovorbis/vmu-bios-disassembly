@@ -5153,10 +5153,10 @@ label_2C57:
   mov   #$E0, @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
-  callf WaitUntilAllBytesSent   ; Clear transfer end flag
-  mov   #$28, $01           ; Read data to send
-  mov   #$0D, scon1         ; Store in transmit buffer
-label_2C7B:   ; Enable SIO0 interrupt
+  callf WaitUntilAllBytesSent
+  mov   #$28, $01
+  mov   #$0D, scon1
+label_2C7B:
   set1  pcon, $00
   ld    p7
   and   #$09
@@ -5175,10 +5175,10 @@ label_2C90:
   mov   #$E0, @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
-  callf WaitUntilAllBytesSent   ; Clear transfer end flag
-  mov   #$7F, $01           ; Read data to send
-  mov   #$0D, scon1         ; Store in transmit buffer
-label_2CAA:   ; Enable SIO0 interrupt
+  callf WaitUntilAllBytesSent
+  mov   #$7F, $01
+  mov   #$0D, scon1
+label_2CAA:
   set1  pcon, $00
   ld    p7
   and   #$09
@@ -5192,10 +5192,10 @@ label_2CB8:
   st    @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
-  callf WaitUntilAllBytesSent   ; Clear transfer end flag
-  mov   #$28, $01           ; Read data to send
-  set1  scon1, $03          ; Store in transmit buffer
-  ret   ; Enable SIO0 interrupt
+  callf WaitUntilAllBytesSent
+  mov   #$28, $01
+  set1  scon1, $03
+  ret
 label_2CCE:
   push  b
   mov   #$01, xbnk
