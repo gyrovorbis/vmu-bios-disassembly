@@ -4577,7 +4577,7 @@ label_2802:
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
   callf WaitUntilAllBytesSent
-  mov   #DataToTransmit, $01
+  mov   #DataTransmitted, $01
   mov   #$0D, scon1
 label_282A:
   set1  pcon, $00
