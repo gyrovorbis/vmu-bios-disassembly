@@ -3945,6 +3945,8 @@ label_22FE:
 label_2301:
   mov   #$00, $2B
   jmpf  label_196F
+
+.org $2307
 FailTransfer:
   ld    p7
   and   #$09
@@ -4286,6 +4288,7 @@ label_2575:
 ;; Postconditions:
 ;; - acc=0: Happy case
 ;; - acc=0xa: Sad case
+.org $2579
 CheckPeerReadyToReceiveMessage:
   push  psw
   clr1  psw, rambk0             ; Use ram bank 0
