@@ -1,0 +1,1893 @@
+// ============================================================ decoded regions
+!5255 5255 2D27 2D32
+!6417 6418 364F 3662
+!6971 6975 3A55 3A97
+!7462 7464 3E3E 3E66
+!9150 9185 E100 E33B
+!9258 9260 E3AC E3CE
+!9115 9135 lit
+|  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+|FlashLibTable:
+|@E000   brf   label_E100
+|@E003   brf   label_E1C1
+|@E006   brf   label_E203
+|@E009   brf   label_E278
+|@E00C   brf   label_E29A
+|@E00F   brf   label_E2F7
+|@E012   brf   label_E319
+|label_E015:
+|@E015   brf   label_E33B
+|@E018   brf   label_E348
+|label_E01B:
+|@E01B   brf   label_E388
+|@E01E   brf   label_E3AC
+|@E021   brf   label_E3BD
+|label_E024:
+|@E024   brf   label_E3CE
+|label_E027:
+|@E027   brf   label_E3F6
+|label_E02A:
+|@E02A   brf   label_E412
+|label_E02D:
+|@E02D   brf   label_E4A0
+!59 59 lit
+|  ;; Maple bus ISR (a Maple frame has arrived in work RAM)
+
+// ============================================================ RAM, bank 0
+$010 BcdYearHi
+$011 BcdYearLo
+$012 BcdMonth
+$013 BcdDay
+$014 BcdHour
+$015 BcdMinute
+$016 BcdSecond
+$017 YearHi
+$018 YearLo
+$019 Month
+$01A Day
+$01B Hour
+$01C Minute
+$01D Second
+$01E HalfSecond
+$01F LeapYear
+$020 MapleMyAddr
+$021 MapleHostAddr
+$022 MapleAddrState
+$023 MapleIdPins
+$024 MapleLastCmd
+$025 MapleExpectedPhase
+$026 MapleWriteBlock
+$027 MapleStorageErr
+$028 MapleLcdErr
+$029 MapleFuncType
+$02B CopyRxArm
+$02C WarmBootMagic
+$030 BiosMode
+$031 DateSet
+$032 ClockAnim
+$033 IdleTicks
+$034 HalfSecTicks
+$035 SleepCtl
+$036 FreeUserBlocksHi
+$037 FreeUserBlocks
+$038 FreeGameBlocksHi
+$039 FreeGameBlocks
+$03A FileCountHi
+$03B FileCount
+$03C SelectedFileHi
+$03D SelectedFile
+$03E FreeExtraBlocksHi
+$03F FreeExtraBlocks
+$050 YearDiv4Hi
+$051 YearDiv4Lo
+$052 MathHi
+$053 MathLo
+$054 FatBank
+$055 FatAddrHi
+$056 FatAddrLo
+$058 DirBlock
+$05C FsError
+$060 CursorX
+$061 CursorY
+$067 TextInvert
+$06D GameLastBlock
+$06E BatteryCheck
+$06F FlashBankTemp
+$070 Buttons_Current
+$073 FastTickDisabled
+$074 FastTicks
+// ============================================================ RAM, bank 1
+$110 DataToTransmit
+$124 CopyBlocksLeft
+$125 NBytesToVerify
+$126 NBytesToSend
+$128 DataTransmitted
+$13D NBlocksToWrite
+$13E NBytesToReceive
+$13F RxPayloadSize
+$17C FlashWaitMode
+$17D FmBank
+$17E FmAddrHi
+$17F FmAddrLo
+%SerialTimeout 34
+%NFreeBlocks 39
+
+// ============================================================ overview
+#1
+| =============================================================================
+|  Sega Dreamcast Visual Memory Unit (VMU) BIOS, American v1.05 (1999/10/26)
+|  "SEGA Visual Memory System BIOS Produced by Sue"   CPU: Sanyo LC86K87 (LC8670)
+| =============================================================================
+|
+|  ROM MAP
+|    $0000-$0062  interrupt vectors + trivial ISRs
+|    $0100-$01F2  public firmware entry points (FM_WRT_EX, FM_PRD_EX, ...)
+|    $0200-$3F32  the BIOS proper (menu, file manager, clock, Maple, VMU-to-VMU copy)
+|    $4000-$7FFF  zero fill
+|    $E000-$E02F  flash library jump table (Sanyo-supplied, BRF r16 each)
+|    $E100-$E4E7  flash library: factory tests, page read/write/verify, clock tick
+|    $E800-$EFFF  6x8 ASCII font, 8 planes of 256 bytes (plane n = pixel row n)
+|
+|  BIOS MODES (BiosMode, cycled by the MODE button in P3Isr: 0 -> 1 -> 2 -> 0)
+|    0 = file manager, 1 = game (run the mini-game in flash), 2 = clock
+|    The main menu (MainMenu) blinks the matching icon; pressing A enters it.
+|    Plugging into a controller (P7.0 = 5V detect) always drops into MapleMode.
+|
+|  CONVENTIONS USED BELOW
+|    Buttons_Current ($70) holds P3 inverted: 1 = pressed.
+|      bit0 Up  bit1 Down  bit2 Left  bit3 Right  bit4 A  bit5 B  bit6 MODE  bit7 SLEEP
+|    The WaitKeyEvent* family returns one of those button bits in ACC, or:
+|      $FF  controller plugged in (P7.0 high), caller must bail to the main menu
+|      $FE  SLEEP pressed in a context that wants to handle sleep itself
+|      $FD  BiosMode changed (MODE pressed), caller must bail to the main menu
+|      $FC  another VMU is plugged into the top connector -> start copy receive
+|    Text cursor: CursorX ($60) / CursorY ($61). Small text is 8 columns x 4 rows of
+|    6x8 cells, big glyphs are 6 columns x 4 rows of 8x8 cells. TextInvert ($67) = $FF
+|    draws inverse video.
+|    Flash addresses are 17 bits: FPR.0 (or FmBank/FlashBankTemp) is A16, TRH:TRL A15-A0.
+|    A filesystem block is 512 bytes; block n lives at flash address n * $200.
+|
+|  FLASH FILESYSTEM (as the BIOS uses it)
+|    Root block 255 ($1FE00): $00-$0F all $55 = formatted, $44 root loc, $46 FAT loc (254),
+|    $4A directory loc (253), $4C directory size (13). FAT: 16-bit LE per block,
+|    $FFFC = free, $FFFA = end of chain. Directory entries are 32 bytes:
+|    +$00 type ($00 none, $33 data, $CC game), +$01 copy protect ($FF), +$02 first block,
+|    +$04 name (12 chars), +$10 BCD timestamp (8), +$18 size in blocks, +$1A header offset.
+|
+|  RAM variables are named in the definitions at the end of this file. The BIOS keeps
+|  its own state in bank 0; bank 1 is the application's bank and is also used for the
+|  firmware-call parameters (FmBank/FmAddrHi/FmAddrLo at $7D-$7F, data buffer $80-$FF).
+| =============================================================================
+|
+
+// ============================================================ vectors / trivial ISRs
+@label_004F IsrInt0
+| External INT0: just acknowledge (clear I01CR.1). The BIOS doesn't use INT0.
+@label_0052 IsrInt1
+| External INT1: just acknowledge (clear I01CR.5).
+@label_0055 IsrInt2Timer0Low
+| INT2 / Timer 0 low overflow: acknowledge both sources, nothing else.
+@label_005A IsrTimer0High
+| Timer 0 high overflow: acknowledge.
+@label_005D IsrTimer1
+| Timer 1 overflow: acknowledge both T1L and T1H flags. Timer 1 drives the buzzer
+| in PWM mode, so this only fires if someone enables its interrupt.
+
+// ============================================================ reset / main menu
+@label_0200 ResetEntry
+| Cold/warm reset. Brings up the hardware, plays the start-up beep and then decides
+| whether RAM survives:
+|   - Buttons_Current must read $F0 (A+B+MODE+SLEEP held; the P3 interrupt records
+|     held buttons while StartupBeep waits)
+|     AND WarmBootMagic ($2C-$2F) must already hold "REST" -> keep RAM (clock keeps
+|     running), go straight to MaybeSetDefaultDate.
+|   - otherwise clear both RAM banks and write "REST" to WarmBootMagic.
+| Then reset the Maple hardware, and if the date was never set run the
+| SetClock procedure before entering MainMenu.
+=0200 OCR: 32kHz quartz, /6, RC + CF oscillators stopped
+=020A BatteryCheck = $FF: no low-battery check during boot
+=020D TextInvert = $FF, so ClearScreenAndIcons lights every icon (lamp test)
+=0219 warm-boot key combo held?
+>0220
+| compare WarmBootMagic against "REST" stored in ROM at Str_RestMagic ($05C3)
+@label_0229 .checkMagic
+@label_024C .coldBoot
+@label_0257 .clearBank
+| (inner) zero 256 bytes of the current RAM bank, 4 at a time
+@label_025D .clearLoop
+=026F second pass clears bank 1
+>0274
+| write "REST" into WarmBootMagic so the next reset is a warm one
+@label_027F .writeMagic
+@label_0294 .ramReady
+=029A MapleHwReset
+=029D MapleInitAddress
+=02A0 VSEL: work RAM owned by the CPU, auto-increment off
+=02A4 Maple receive disabled until MapleMode
+=02A6 enable automatic low-battery check
+@label_02AF MaybeSetDefaultDate
+| If the date was never set (DateSet == 0), load 2000-01-01 00:00:00 and ask the
+| user to set the clock. While plugged into a controller this is skipped and the
+| BIOS goes straight to MapleMode.
+=02B6 InitDefaultDateTime
+=02BB P7.0: controller 5V present?
+=02C4 OCR $81: RC oscillator so the XRAM icon writes work
+=02C7 XBNK 2 = icon area: show only the clock icon
+=02DB SleepCtl $40: sleep button ignored while setting the clock
+=02DE SetClockProcedure; ACC != 0 if aborted (controller plugged in)
+=02E3 remember that the date has been set
+@label_02EF MainMenu
+| Main menu / mode select. Draws the "Visual Memory Unit" banner, then idles in HALT,
+| waking on every interrupt. MODE (handled in P3Isr) cycles BiosMode 0/1/2 and the
+| matching icon blinks on every half-second tick; A enters the selected mode.
+| Re-entered from almost everywhere when a mode exits, so it re-validates
+| everything: controller plugged in -> MapleMode, date not set -> MaybeSetDefaultDate.
+=02F7 controller plugged in -> MapleMode
+=02FB date never set -> back to the set-clock flow
+=0300 Str_VmuBanner ($05C7)
+=030F enable button interrupts
+=0311 IdleTicks = 1: restart the auto-sleep timeout
+@label_0317 .idle
+=0317 HALT until the next interrupt (base timer, buttons, Maple)
+=031F IdleTicks wrapped to 0 (~2 minutes idle) -> sleep
+=0323 SLEEP pressed -> sleep
+@label_0333 .sleep
+@label_0337 .toMaple
+@label_033A .fileSelected
+=033A A pressed?
+=0340 half-second tick?
+=034F blink the file icon
+@label_035E .toFileManager
+@label_0360 .gameSelected
+=0375 blink the game icon
+@label_0384 .toGame
+@label_0387 .clockSelected
+=039C blink the clock icon
+=03A4 BIOS bug: leaves XBNK at 2 here (the other two modes restore 0)
+@label_03AB .toClock
+@label_03AE EnterFileManager
+| A pressed with the file icon selected: light the file icon, check that the root
+| block starts with 16 x $55 (formatted) and hand over to FileManager. Otherwise
+| show "Format memory" until the mode changes or the controller is plugged in.
+| The BIOS has no formatter, the Dreamcast does that.
+=03C4 FPR.0 = 1: root block lives in the upper 64K
+@label_03D3 .checkFormat
+=03DB CopyRxArm = 0: don't offer VMU-to-VMU receive yet
+@label_03E1 .notFormatted
+=03E6 Str_FormatMemory
+@label_03FA .waitLoop
+@label_0408 .exit
+@label_040A .sleep
++Str_FormatMemory 040E
+
+@label_0421 SleepUntilWake
+| SLEEP_EX ($0140) lands here too. Turns the LCD off (VCCR/MCR = 0), waits for all
+| buttons to be released, then HALTs until SLEEP is pressed again. Preserves
+| BiosMode and BatteryCheck. If the VMU gets plugged into a controller while asleep
+| it doesn't return: it resets SP and enters MapleMode.
+=042B no battery nagging while asleep
+=042E LCD off
+=0434 WaitAllButtonsReleased
+=0441 SLEEP pressed again?
+=0447 LCD back on
+=044D clear the sleep request, restart idle timeout
+@label_0439 .halt
+@label_045C .pluggedIn
+
++FontGlyphs8x8 0473
+| 8x8 glyphs used by DrawGlyph8x8 (8 bytes each, MSB = leftmost pixel):
+|   $00-$09 '0'-'9'   $0A ':'   $0B down-triangle   $0C up-triangle
+|   $0D-$0F '/' (three copies)   $10-$29 'A'-'Z'
++Str_RestMagic 05C3
+| "REST" (warm-boot magic). Str_VmuBanner starts right after it; bytes $17-$1A
+| are the bold "SEGA" logo characters of the 6x8 font.
++Str_VmuBanner 05C7
+=02B3 $6C is written here and never read anywhere else
+
+// ============================================================ Maple
+@label_05E8 MapleRxIsr
+| Maple bus interrupt: a complete frame from the Dreamcast is sitting in the
+| 512-byte work RAM (read through VRMAD/VTRBF). The frame header word is stored
+| byte-reversed: WRAM+3 = command, +2 = recipient address, +1 = sender address,
+| +0 = payload length in 32-bit words. Payload words follow from WRAM+4.
+|
+| Until we know our own address (MapleAddrState == 0) only a Device Request (1)
+| addressed to our port/slot is accepted; that latches MapleMyAddr. After a Device
+| Kill (4) MapleAddrState is $55 and every frame is ignored.
+| Function codes handled (MapleFuncType, see MapleParseFunctionCode):
+|   $02 storage (flash), $04 LCD, $08 clock (timer, buttons, buzzer).
+| Commands:
+|   $01 device request       -> MapleCmdDeviceInfo   (reply $05)
+|   $02 all status request   -> MapleCmdAllStatus    (reply $06)
+|   $03 device reset         -> MapleCmdReset        (reply $07)
+|   $04 device kill          -> MapleCmdKill         (reply $07)
+|   $09 get condition        -> clock: MapleClockGetCondition (buttons)
+|   $0A get media info       -> storage/LCD media info
+|   $0B block read           -> storage: MapleStorageBlockRead, clock: MapleClockBlockRead
+|   $0C block write          -> storage/LCD/clock block write
+|   $0D get last error       -> MapleStorageGetLastError (end of a block write)
+|   $0E set condition        -> clock: MapleClockSetCondition (buzzer)
+|   $FC resend request       -> MapleResendLastReply
+| Anything else gets $FD (unknown command); unsupported functions get $FE;
+| malformed frames (bad length) get $FC (please resend).
+=05E8 hand work RAM to the CPU
+=05F8 MAPLESTA error bits (5, 4, 1) set?
+=0607 do we know our address yet?
+=060B WRAM+3: command
+=0617 WRAM+2: recipient address
+=0620 our port/slot bits?
+=0626 latch recipient address (with the port bits) as ours
+@label_0617 .checkRecipient
+@label_0626 .latchAddress
+@label_062F .frameError
+@label_0635 .frameErrorForUs
+@label_063F .addressKnown
+=0641 $55 = killed (device kill): ignore everything
+@label_0646 .dispatch
+@label_064C .addressedToUs
+=0656 WRAM+0: payload length must be 0
+@label_0666 .badLength1
+@label_066A .cmd2
+@label_067D .badLength2
+@label_0681 .cmd3
+@label_0694 .badLength3
+@label_0698 .cmd4
+@label_06AB .badLength4
+@label_06AF .cmdA
+=06B9 2 words: function code + partition
+@label_06CB .mediaInfoStorage
+@label_06CF .mediaInfoLcd
+@label_06D3 .badLengthA
+@label_06D7 .cmdB
+@label_06F3 .blockReadClock
+@label_06F7 .blockReadStorage
+| copy length + function code + location word into bank 1 $70-$78 for MapleBlockToFlashAddr
+@label_070C .copyLocation
+@label_0731 .badLengthB
+@label_0735 .cmdC
+@label_074C .blockWriteLcd
+@label_0750 .blockWriteClock
+@label_0754 .unsupportedC
+@label_0756 .cmdD
+@label_0767 .getLastError
+=0771 WRAM+$0A: phase of the write being finished
+@label_077E .phaseOk
+@label_0785 .unsupportedD
+@label_0787 .cmdFC
+@label_078E .cmd9
+@label_07A9 .badLength9
+@label_07AD .unsupported9
+@label_07AF .cmdE
+@label_07CA .badLengthE
+@label_07CE .unsupportedE
+@label_07D0 .unknownCommand
+@label_07D4 .unsupportedFunction
+@label_07D8 .done
+=07D8 acknowledge the frame
+=07E8 give work RAM back to the Maple hardware
+@label_07EB MapleCheckRecipient
+| Out: ACC = MapleMyAddr - recipient (0 if the frame is for us), B = recipient.
+| Also latches the sender into MapleHostAddr for the reply.
+@label_0800 MapleReplyResend
+| Reply with command $FC ("request resend"), no payload. Used for malformed frames.
+@label_081D MapleBeginReply
+| Point work RAM at $100 (the transmit half) with the CPU owning it, ready to write
+| a reply header with successive VTRBF stores.
+=081F MAPLETXRXCTL.4 off while building the reply
+=0821 VRMAD = $100
+@label_0827 MapleParseFunctionCode
+| Decode the first payload word (function code, WRAM+4..7) into MapleFuncType:
+| $02 storage, $04 LCD, $08 clock, $FF anything else (or more than one bit set).
+@label_084B .lcd
+@label_0850 .clock
+@label_0853 .return
+@label_0854 .unsupported
+@label_0858 MapleBlockToFlashAddr
+| Validate the storage location word copied to bank 1 ($75 block lo, $76 block hi,
+| $77 phase, $78 partition) and turn it into firmware-call parameters
+| FmBank/FmAddrHi/FmAddrLo = block * 512 + phase * 128.
+| Errors are OR'ed into MapleStorageErr: bit0 partition != 0, bit1 phase != expected
+| (MapleExpectedPhase is then set to $FF), bit2 block > 255. Also sets FlashWaitMode = 1.
+=0866 expected phase
+=087E block number high byte
+=0891 block number low byte
+=08A9 (bit 6 of block : block<<2 | phase) * $80
+=08B3 FM_WRT completion: DQ7 data polling
+@label_0864 .checkPhase
+@label_0876 .checkBlockHi
+@label_0887 .computeAddress
+@label_08B8 .return
+@label_08B9 MapleCmdDeviceInfo
+| Device Request -> reply $05 "device status", 28 words copied from MapleDeviceInfo:
+| function codes, function definition words, area, connector direction, product
+| name, license string, power figures.
+=08BE length $1C words
+=08C9 command $05
+=08DB first 3 words, then 6 x 4, then 1
+@label_08E6 .sendChunk
+@label_090F MapleCmdAllStatus
+| All Status Request -> reply $06, 48 words: the 28 device-info words followed by the
+| BIOS version string ("Version 1.005,1999/10/26,315-6208-05,...").
+@label_093C .sendChunk
+@label_0962 MapleCmdReset
+| Device Reset: ack, re-derive our address from the P7 ID pins and clear the screen.
+@label_0970 MapleCmdKill
+| Device Kill: ack and stop answering (MapleAddrState = $55).
+@label_097B MapleReplyUnknownCommand
+| Reply $FD (unknown command), no payload.
+@label_099B MapleReplyFunctionUnsupported
+| Reply $FE (function code not supported), no payload.
+@label_09BB MapleStorageGetMediaInfo
+| Get Media Info for storage -> reply $08 with 7 words: the function code and 6 words
+| of volume layout. If the root block carries the $55 format marker, the layout
+| (FAT/directory location and size, icon shape, user blocks, ...) is read from root
+| block offsets $46-$57; otherwise the default layout at MapleStorageMediaInfo is sent.
+=09E3 root block format marker
+@label_09E3 .checkFormat
+=0A04 root+$47/$46
+=0A21 root+$48.. (16 bytes)
+@label_0A38 .unformatted
+@label_0A6A MapleLcdGetMediaInfo
+| Get Media Info for LCD -> reply $08: function code + MapleLcdMediaInfo
+| (48x32, 1 bpp, ...).
++MapleDeviceInfo 0A95
+| Maple device info (28 words, kept in Dreamcast word order; MapleTxRomWords reverses
+| each word for the wire): functions $0E (storage|LCD|clock), the three function definition
+| words, area code $FF, connector direction 0, then the 30-char product name and the
+| 60-char license string, then standby/max power.
++Str_BiosVersion 0B05
++MapleStorageMediaInfo 0B59
++MapleLcdMediaInfo 0B75
+@label_0B7D MapleStorageBlockRead
+| Block Read on storage -> reply $08 with $82 words: function code, location word,
+| then the 512-byte block straight out of flash (the flash access icon is lit
+| while it streams). Any location error (MapleStorageErr) -> MapleReplyFileError.
+=0B86 length $82 words
+=0BA1 echo function code + location word from bank 1 $71..
+=0BC2 31 chunks of 16 bytes here, the 32nd below
+=0BC8 flash access icon on
+@label_0BCB .sendChunk
+@label_0BDB .noCarry
+@label_0BFB .error
+@label_0BFE MapleClockBlockRead
+| Block Read on the clock -> reply $08: function code + date/time word pair
+| (year, month, day, hour, minute, second, weekday = 0).
+@label_0C58 .badLocation
+@label_0C5B MapleStorageBlockWrite
+| Block Write on storage. A 512-byte block arrives as 4 frames of 128 bytes
+| (phase 0-3). Each frame is acked immediately, then written to flash with
+| FM_WRT + verify; errors accumulate in MapleStorageErr:
+|   bit2 block differs from phase 0's, bit4 wrong frame length, bit3 verify failed.
+| The Dreamcast finishes with Get Last Error (cmd $0D).
+=0C62 bank 1 $70.. = length, function code, location
+=0C87 bank 1 $80-$FF = the 128 data bytes
+=0CAD flash access icon on
+=0CB0 phase 0?
+=0CBA remember the block number for the next phases
+@label_0C70 .copyHeader
+@label_0C8D .copyData
+@label_0CBF .checkBlock
+@label_0CCB .checkLength
+@label_0CD6 .write
+=0CE6 Maple words arrive byte-reversed
+=0CEA no interrupts while the flash is being programmed
+=0CEC FM_WRT (unlock + program 128 bytes)
+=0CF1 FM_VRF
+@label_0CFE .return
+@label_0D01 .return2
+@label_0D02 MapleLcdBlockWrite
+| Block Write on the LCD: a 48x32 1bpp image (48 words) is byte-swapped in bank 1
+| ($40-$FF) and copied into both XRAM banks. Errors (wrong length, nonzero
+| partition/phase/block) are collected in MapleLcdErr and answered with $FA.
+@label_0D15 .checkPhase
+@label_0D22 .checkPartition
+@label_0D2F .checkBlock
+@label_0D3A .badBlock
+@label_0D40 .checkErrors
+@label_0D48 .copyImage
+@label_0D53 .copyLoop
+=0D84 $01 counts the two XRAM banks
+@label_0D87 .xbank
+@label_0D8D .row
+@label_0D90 .copy12
+@label_0DBA .return
+@label_0DBD MapleClockBlockWrite
+| Block Write on the clock (set date/time): takes year/month/day/hour/minute/second
+| from the payload, recomputes the leap-year flag and marks the date as set.
+=0DFC UpdateLeapYear
+@label_0E05 .badLocation
+@label_0E08 MapleClockGetCondition
+| Get Condition on the clock: reply with the raw button state (P3, active low),
+| MODE and SLEEP masked off so the DC only sees the d-pad and A/B.
+@label_0E3A MapleClockSetCondition
+| Set Condition on the clock: start the buzzer. Timer 1 runs in PWM mode on P1.7;
+| the DC supplies a period and a duty value.
+@label_0E5D MapleStorageGetLastError
+| Get Last Error (end of block write): turn the flash icon off and ack, or report
+| MapleStorageErr with $FB.
+@label_0E6C .error
+@label_0E6F MapleResendLastReply
+| The DC asked us to resend ($FC): rebuild the reply for MapleLastCmd.
+@label_0E75 .dispatch
+@label_0E9B .deviceInfo
+@label_0E9F .allStatus
+@label_0EA3 .mediaInfo
+@label_0EAC .mediaInfoLcd
+@label_0EB0 .blockRead
+@label_0EB9 .blockReadClock
+@label_0EBD .ack
+@label_0EC3 .lastError
+@label_0EC7 .condition
+@label_0ECB .buzzer
+@label_0ECF .unknown
+@label_0ED3 .resend
+@label_0ED7 .fileError
+@label_0EDB .lcdError
+@label_0EDD .return
+@label_0EDE MapleReplyFileError
+| Reply $FB (file error) with one word: MapleStorageErr.
+@label_0F08 MapleReplyLcdError
+| Reply $FA with one word: MapleLcdErr.
+@label_0F32 MapleReplyAck
+| Reply $07 (device reply / ack), no payload. Caller must have called MapleBeginReply.
+@label_0F4A MapleTxRomWords
+| Copy B words from ROM (TRH:TRL + ACC) into work RAM, reversing the byte order of
+| every word. ACC is advanced past the copied words on return.
+@label_0F4F .loop
+@label_0F79 MapleTxRamWords
+| Copy B words from bank 1 @R0 into work RAM as-is.
+@label_0F7B .loop
+@label_0F95 MapleTxFlashWords
+| Copy B words from flash (FPR, TRH:TRL) into work RAM, byte-reversed, lighting
+| the flash access icon. TRL is advanced past the copied words.
+@label_0F9F .loop
+@label_0FBF MapleWaitTxReady
+| Spin until MAPLESTA.0 says the transmit chunk has been taken by the hardware.
+@label_0FC1 .wait
+@label_0FC9 ByteSwapWordsBank1
+| Reverse the byte order of C 32-bit words in bank 1 starting at R0 (rounded down
+| to a multiple of 4).
+@label_0FDB .loop
+@label_1007 MapleHwReset
+| Pulse MAPLERST, then VSEL = $13 (work RAM to Maple, auto-increment) and enable
+| frame reception (MAPLETXRXCTL.2).
+@label_1017 MapleInitAddress
+| Forget our Maple address and compute the expansion-slot bit from P7.2-3 (which
+| slot of the controller we are in) via MapleSlotBits; MapleIdPins keeps the raw
+| pin state so MapleMode can notice a move to another slot.
++MapleSlotBits 1030
+
+// ============================================================ clock mode
+@label_1034 ClockMode
+| BiosMode 2, A pressed. Shows HH:MM in big digits with the selected animal
+| animation (ClockAnimationStep) on the right. Keys:
+|   A alone / Right -> ClockShowDate for a few seconds
+|   A + Left        -> ClockSettingsMenu
+|   MODE / plug in  -> back to MainMenu (via WaitKeyEvent's $FD / $FF)
+|   SLEEP           -> SleepUntilWake, then redraw
+@label_104D .redraw
+@label_1058 .loop
+=1069 A + Left held together?
+=106F seconds changed since last pass?
+=1075 advance the clock animation one frame
+=1077 new minute -> redraw HH:MM
+@label_1077 .noTick
+@label_1088 .sleep
+@label_108D .settings
+@label_1099 .showDate
+=10A1 SleepCtl $80: SLEEP returns $FE to this loop
+@label_10A4 .dateLoop
+=10B7 B (without A/Right) -> back to the time
+=10BA show the date for 8 half-second ticks
+@label_10C4 .exit
+@label_10CA ClockDrawTime
+| Clear the screen and draw HH:MM with the big 8x8 digits (row 0). Also resets the
+| animation frame counter in ClockAnim (keeps the animal selection bits).
+=10E8 ACC = BCD minute
+=10EF glyph $0A = ':'
+@label_1102 ClockUpdateTime
+| Called when Second == 0: redraw the minutes, and the hours too on the hour.
+@label_1121 .return
+@label_112E ClockShowDate
+| Draw the date below the time: year on row 2, month name + day on row 0 (the
+| row-0 time is overwritten), and refresh the BCD copies BcdYearHi..BcdDay.
+@label_1167 ClockSettingsMenu
+| "Set clock" with a Yes/No choice (Left/Right, kept in B, No preselected).
+| A on Yes runs SetClockProcedure; A on No moves on to the animal picker
+| (AnimalMenu). B returns to the clock.
+| Out: ACC = 0 back to ClockMode, $FF if the controller was plugged in.
+@label_117E .loop
+@label_1192 .select
+@label_119D .toggle
+@label_11AB AnimalMenu
+| Pick the clock animation: Up/Down cycles ClockAnim bits 7-6 through
+| Dog (0), Fish ($40), Bird ($80). A accepts, B goes back to ClockSettingsMenu.
+@label_11B6 .loop
+@label_11CA .next
+@label_11D9 .add
+@label_11DD .redraw
+@label_11E1 .prev
+@label_11EC .sub
+@label_11F2 .accept
+@label_11FB .pluggedIn
+@label_11FF DrawAnimalMenu
+| "Animated display" title, then falls into DrawAnimalName.
+@label_1213 DrawAnimalName
+| Name of the animal selected in ClockAnim bits 7-6 on row 3.
+@label_1226 .dog
+@label_122E .fish
+@label_1234 .draw
+@label_1240 DrawSetClockTitle
+| "Set clock" on rows 0-1.
+@label_1253 InitDefaultDateTime
+| Load 2000-01-01 00:00:00 into the BCD copy (BcdYearHi..BcdSecond) and the binary
+| date/time (YearHi..Second), and clear HalfSecond.
+=1259 R0 -> BcdYearHi: Bcd16ToBin -> MathHi:MathLo
+@label_129D SetClockProcedure
+| The set-the-clock wizard: year, month, day, hour, minute, then "OK ?". Each step
+| returns $20 (B pressed) to step back to the previous field. Gives up with
+| ACC = $FF as soon as the VMU is plugged into a controller; ACC = 0 when done.
+| Seconds are reset to 0 when the user confirms.
+=12AF seconds restart from zero
+=12B8 SleepCtl $40: ignore SLEEP while editing
+@label_12BB .year
+=12CB UpdateLeapYear
+@label_12CE .month
+@label_12DB .day
+@label_12E8 .hour
+@label_1303 .minute
+@label_1323 .return
+@label_1329 .pluggedIn
+@label_132E SetClockEditYear
+| Up/Down change the year (wraps 0 <-> 9999), A or B leave the field.
+| Out: ACC = key that ended the edit.
+@label_1334 .loop
+@label_1348 .inc
+=1359 year > $270F (9999) -> wrap to 0
+@label_136F .dec
+@label_138D .redraw
+@label_1394 .return
+@label_1395 SetClockEditMonth
+| Up/Down change the month (1-12, wrapping) and clamp the day to the new month's
+| length (February honours LeapYear).
+@label_139B .loop
+@label_13B2 .inc
+@label_13C1 .dec
+@label_13CA .redraw
+@label_13DB .return
+@label_13DC .clamp30
+@label_13EC .setDay30
+@label_13F3 .clampFeb
+@label_13FD .feb
+@label_1406 .feb28
+@label_1409 .redrawDay
+@label_140D SetClockEditDay
+| Up/Down change the day within the current month's length. On exit the day is
+| clamped again in case the month/leap year changed.
+@label_1413 .loop
+@label_142A .clampAndReturn
+@label_1440 .clampFeb
+@label_1451 .clampFebLeap
+@label_145E .clamp30
+@label_1469 .return
+@label_146C .inc
+@label_148C .inc30
+@label_1499 .incFeb
+@label_14AA .incFebLeap
+@label_14B7 .dec
+@label_14D3 .dec30
+@label_14DC .decFeb
+@label_14E9 .decFebLeap
+@label_14F0 .redraw
+@label_14F4 SetClockEditHour
+| Up/Down change the hour (0-23, wrapping).
+@label_14FA .loop
+@label_1511 .inc
+@label_1520 .dec
+@label_152A .redraw
+@label_1531 .return
+@label_1532 SetClockEditMinute
+| Up/Down change the minute (0-59, wrapping).
+@label_1538 .loop
+@label_154F .inc
+@label_155E .dec
+@label_1568 .redraw
+@label_156F .return
+@label_1570 SetClockConfirm
+| "OK ?" with a Yes/No choice (Left/Right). A on Yes -> ACC = 0 (done),
+| A on No or B -> ACC = $20 (go back to the minute field).
+@label_1579 .loop
+@label_1590 .toggle
+@label_159E .select
+@label_15A7 .no
+@label_15AA .return
+@label_15AB DrawYear
+| Year (YearHi:YearLo) as 4 big digits at column 2 of row CursorY.
+=15B0 Bin16ToBcd -> MathHi:MathLo
+@label_15BF DrawMonthName
+| Three-letter month name from MonthNames in big glyphs at columns 3-5.
+| The big font has no lower case: glyph = ASCII - $31 maps 'A' to glyph $10.
+@label_15DD .loop
++MonthNames 15F7
+@label_162B DrawDay
+| Day at column 0 of row CursorY, big digits; one digit is drawn after a blank cell.
+@label_1640 .oneDigit
+@label_164B .return
+@label_164E DrawHour
+| Hour at column 1 (single digit after a blank), big digits. Out: ACC = BCD hour.
+@label_1663 .oneDigit
+@label_166E .return
+@label_1671 DrawMinute
+| Minute at columns 4-5, big digits. Out: ACC = BCD minute.
+@label_1681 SetClockShowYear
+| Screen for the year field: up/down arrows above/below the year, ":Select" hint.
+@label_16AF SetClockShowMonth
+| Screen for the month field: month name + day, arrows over the month.
+@label_16BC .clear
+@label_16F2 SetClockShowDay
+| Screen for the day field: arrows over the day.
+@label_16FF .clear
+@label_173B SetClockShowHour
+| Screen for the hour field: HH:MM with arrows over the hour.
+@label_174B .clear
+@label_179E SetClockShowMinute
+| Screen for the minute field: arrows over the minutes, ":Select" hint.
+@label_17DC SetClockShowConfirm
+| "OK ?" prompt with the Yes/No choice, Yes highlighted.
+@label_1805 ClockAnimationStep
+| Called once per second from ClockMode. ClockAnim layout:
+|   bits 7-6 animal (0 dog, 1 fish, 2 bird), bit 5 sprite frame toggle,
+|   bit 4 "resting" (draw the blank sprite), bits 3-0 position counter.
+| AnimSequences holds, per animal, an end marker N followed by N-1 XRAM offsets
+| (lower screen half, XBNK 1); the counter walks 1..N-1 and then wraps, flipping
+| bit 4 so every other pass erases the trail with the blank sprite.
+@label_1826 .skipSequence
+@label_1838 .lookup
+@label_186D .return
+@label_187A .resting
+@label_188B .wrap
+@label_1897 BlitSprite8x8
+| Copy 8 bytes from ROM (TRH:TRL) to XRAM at R2, stepping one LCD line per byte
+| (lines are 6 bytes apart, with a 4-byte gap after every second line).
+@label_18A5 .loop
+@label_18B7 .nextLine
++AnimSprites 18CF
+| Clock animation sprites, 8 bytes each: dog x2, fish x2, bird x2, then a blank one.
++AnimSpriteBlank 18FF
++AnimSequences 1907
++Str_AnimatedDisplay 191C
++Str_Bird 192F
++Str_Dog 1938
++Str_Fish 1941
++Str_SetClock 194A
++Str_SelectHint 195D
++Str_OkPrompt 1966
+
+// ============================================================ file manager
+@label_196F FileManager
+| BiosMode 0 entry (also the return point after copy/delete). Sanity-checks the root
+| block first; FsError bits from this check:
+|   $40 root+$44 (root location) is not 255
+|   $20 root+$46 (FAT location) is not 254 or in $C7-$E6
+|   $10 root+$4A (directory location) is outside $C7-$E5 / $F1-$FD
+| (a directory location in $E6-$F0 fails without setting a bit, showing code 00).
+| Any failure shows "System error" with the FsError code in hex.
+=197E root+$44 must be $00FF
+@label_1987 .badRoot
+@label_198D .checkFat
+@label_19A1 .fatHi
+@label_19A6 .badFat
+@label_19AC .checkDir
+@label_19CC .dirHi
+@label_19D5 .badDir
+@label_19DB FsSystemError
+| "System error" + FsError in hex on row 3; waits for MODE or a controller.
+@label_19FD .wait
+@label_1A06 .exit
+@label_1A08 FileList
+| Shows the free-block summary until A or Right is pressed (or ~6.5 s pass), then
+| scans the directory and shows one file at a time. If another VMU is connected
+| (WaitKeyEvent returns $FC) it switches to CopyReceive.
+| Keys in the list: Up/Down step SelectedFile through 1..FileCount (wrapping),
+| Right shows details, B / Left go back to the summary.
+=1A0E SelectedFile = 1
+@label_1A17 .summaryLoop
+@label_1A1F .stillFileMode
+=1A2B 13 half-second ticks on the summary screen, then scan anyway
+@label_1A34 FileListScan
+| (Re)scan the directory and draw the current entry. Also the return point after a
+| delete. FileCount == 0 -> FileListEmpty.
+@label_1A47 .sleep
+@label_1A4C .exit
+@label_1A4E .showEntry
+=1A57 first time here: arm VMU-to-VMU receive
+@label_1A5E FileListLoop
+@label_1A7B .receive
+@label_1A7E .exit
+@label_1A80 FileListNext
+| Select the next file, wrapping to 1 after FileCount.
+@label_1A8C .redraw
+@label_1A94 FileListPrev
+| Select the previous file, wrapping to FileCount below 1.
+@label_1A9E .redraw
+@label_1AA6 FileDetails
+| Details for the selected file: 16-char VMS description on rows 1-2, type and size
+| on row 3. Up/Down go straight to the next/previous file, B/Left back to the list,
+| Right opens the Copy/Delete menu. Receiving from another VMU is disarmed here.
+@label_1AC0 .loop
+@label_1ADA .back
+@label_1AEB FileActionMenu
+| "Copy" / "Delete" menu (Up/Down toggles the highlight). A runs the highlighted
+| action (FileCopy / FileDelete), B / Left return to FileDetails.
+@label_1AED .copyHighlighted
+@label_1AF2 .copyLoop
+@label_1B0C .doCopy
+@label_1B0F .deleteHighlighted
+@label_1B14 .deleteLoop
+@label_1B2E .back
+@label_1B30 .doDelete
+@label_1B33 FileListEmpty
+| "No saved files"; B / Left -> summary, another VMU -> CopyReceive.
+@label_1B50 .loop
+@label_1B64 .back
+@label_1B66 .receive
+@label_1B68 FileManagerExit
+| Common exit to MainMenu.
+@label_1B6B CountFreeUserBlocks
+| Count $FFFC (free) FAT entries for blocks 0-199 into FreeUserBlocksHi:FreeUserBlocks.
+@label_1B82 .loop
+@label_1B8C .checkHi
+@label_1B94 .next
+@label_1B9A .noCarry
+@label_1BC7 DrawFreeBlocksScreen
+| "Free" / "Game" summary: total free user blocks on row 0 and the number of free
+| blocks at the start of the volume (usable for a game) on row 1.
+@label_1C01 CountFiles
+| Walk the directory (following the FAT chain from the root's directory location)
+| and count non-empty entries into FileCountHi:FileCount. A broken chain sets
+| FsError bit 2. Leaves the FAT address in FatBank/FatAddrHi/FatAddrLo.
+@label_1C2B .block
+@label_1C2E .entry
+@label_1C33 .nextEntry
+@label_1C79 .nextBlock
+@label_1C88 .return
+@label_1C89 .badChain
+@label_1C90 CountFreeExtraBlocks
+| Count free FAT entries for blocks 200-230 (the area past the user blocks) into
+| FreeExtraBlocksHi:FreeExtraBlocks. Only used by the copy-receive space check.
+@label_1CAC .loop
+@label_1CBA .next
+@label_1CED DrawFileCounter
+| "  n/ N" on row 0 (current index is drawn by DrawFileEntry) and the "/  /" date
+| separators on row 3. Preserves ACC.
+@label_1D10 DrawFileEntry
+| Locate entry SelectedFile and draw it: index on row 0, 12-char name on rows 1-2
+| (inverted if the file is copy protected), MM/DD/YY on row 3. On return TRH:TRL
+| point at the entry. If the entry can't be found, "No saved files" + FsError.
+=1D29 protected files are drawn inverted
+=1D3F 8 name characters on row 1
+@label_1D3B .name
+@label_1D42 .nameRow1
+@label_1D55 .nameRow2
+=1D6E timestamp month
+=1D7A timestamp day
+=1D88 timestamp year
+=1D8C back to the start of the entry
+@label_1D92 .return
+@label_1D97 .notFound
+@label_1DB7 DrawVmsDescription
+| Follow the file's FAT chain to its header block (entry+$1A = header offset in
+| blocks; must be < 256) and draw the first 16 bytes of the VMS header (the
+| description) on rows 0-1. Any inconsistency -> "File is damaged" + FsError bit 0.
+@label_1DE0 .walk
+@label_1E06 .headerInFirstBlock
+@label_1E0C .readHeader
+@label_1E1B .row
+@label_1E21 .char
+@label_1E32 .return
+@label_1E41 .damaged
+@label_1E61 DrawFileType
+| "Data" ($33), "Game" ($CC) or "Other" on row 3.
+@label_1E76 .data
+@label_1E7E .game
+@label_1E84 .draw
+@label_1E98 DrawFileSize
+| Size in blocks (entry+$18) at column 5 of row 2.
+@label_1EC9 DrawYesHint
+| Clear the bottom half and draw the "A :Yes" hint on row 2.
+@label_1EEB DrawActionMenuCopy
+| "Copy" (inverted) and "Delete".
+@label_1F19 DrawActionMenuDelete
+| "Copy" and "Delete" (inverted).
+@label_1F47 DrawYesNoChoice
+| "Yes" / "No" on row 3, ACC != 0 highlights Yes, ACC == 0 highlights No.
+| Preserves ACC (the callers keep their choice in it).
+@label_1F50 .yes
+@label_1F67 .no
+@label_1F7B FindDirEntryByIndex
+| Point TRH:TRL (and FPR) at the SelectedFile-th used directory entry (1-based,
+| only types $33/$CC count). Past the end of the directory FsError bit 7 is set.
+@label_1FA6 .block
+@label_1FA9 .entry
+@label_1FB2 .used
+@label_1FBA .next
+@label_1FD2 .return
+@label_1FD5 .end
+@label_1FDD FindDataFileByName
+| Search the directory for a data file ($33) whose name matches the 12 bytes at
+| bank 1 $29 (the name received from the other VMU). Out: ACC = $FF found, 0 not.
+@label_2006 .block
+@label_2009 .entry
+@label_200F .compare
+@label_2014 .next
+@label_202C .notFound
+@label_2035 .return
+@label_2038 .found
+@label_2043 DirNextBlock
+| Follow the FAT from DirBlock to the next directory block and point TRH:TRL at it.
+| End of chain ($FFFA) or a bad link sets FsError bit 7.
+@label_207E .follow
+@label_208C .return
+@label_208F .end
+@label_2097 CompareFileName
+| Compare the name of the entry at TRH:TRL (+4, 12 bytes) with bank 1 $29..$34.
+| Out: ACC = 0 if equal.
+@label_20AF .loop
+@label_20BA .return
++Str_FreeGame 20C5
++Str_FileCounter 20D0
++Str_SystemError 20E5
++Str_NoSavedFiles 20F8
++Str_FileDamaged 210B
++Str_Copy 211E
++Str_Delete 2127
++Str_YesHint 2130
++Str_NoHint 2137
++Str_Yes 213D
++Str_No 2142
++Str_TypeData 2147
++Str_TypeGame 2150
++Str_TypeOther 2159
+
+// ============================================================ VMU-to-VMU copy, sender
+@label_2162 FileCopy
+| "Copy ?" for the selected file (TRH:TRL = its directory entry). Copy-protected files
+| get "Unable to copy". On Yes: if another VMU is plugged into the top connector
+| (P7.3 set, P7.0 clear) start CopySend, otherwise show "Connect VM" with a spinner
+| until one appears ($FC) or B is pressed.
+=2167 copy protect byte = $FF?
+@label_216C .confirm
+@label_217A .confirmLoop
+@label_2191 .toggle
+@label_219F .select
+@label_21A3 .cancel
+@label_21A6 .yes
+=21A9 another VMU connected and no controller?
+@label_21B2 .waitForVmu
+=21B9 spinner: font characters $F0-$F7
+@label_21BF .spinLoop
+@label_21DE .drawSpinner
+@label_21EB .connected
+@label_21F0 .exit
+@label_21F3 FileCopyProtected
+| "Unable to copy" until B / Left.
+@label_2218 .loop
+@label_2229 .back
+@label_222C CopySend
+| Send the selected file over SIO to the other VMU. Packet sequence (the receiver
+| acks every header with $0C, see CheckPeerReadyToReceiveMessage):
+|   [$11 $02 type size $FF]     file info
+|   [$1B $06 name(12) $FF]      file name
+|   per 128-byte page: [$5x $04 data(128)] then [$10 $08 $00 $FF]
+|   [$1B $03 entry+$10..$1B $FF] timestamp, size, header offset
+|   [$10 $08 $00 $FF]            done
+| A $0A answer to the name packet means the receiver already has a file with that
+| name; a $0A after the info packet means it has no room.
+=222C OCR $81: run from the RC oscillator
+=223A "Copying!" on row 2
+=2253 bank 1 $10.. = DataToTransmit, $28.. = DataTransmitted
+=2276 CopyBlocksLeft = file size in blocks
+=228F $0A after the info packet: no room on the other side
+@label_2294 .sendName
+=22CE keep receiving
+=22D0 $0A after the name: same file exists
+@label_22DF CopyFinished
+| Restore P1/SIO, back to the quartz clock, and wait for A before returning to the
+| file manager. Also reached after a failure or "Not enough memory".
+@label_22F0 .waitA
+@label_22FE .exit
+@label_2301 .restart
+@label_2332 CopyFailNoRoom
+@label_2338 CopyFailSameFile
+@label_233E CopySendFileBlocks
+| Walk the file's FAT chain (CopyBlocksLeft blocks) and send every block as four
+| 128-byte pages (CopySendPage), each followed by a [$10 $08 $00 $FF] packet.
+| Out: ACC = 0 ok, $FF on any transfer error.
+@label_2381 .block
+@label_2395 .page
+=239B FM_VRF (result unused)
+=23C5 next 128 bytes
+=23D7 FAT entry of this block -> next block number
+@label_240E .fail
+@label_2426 CopySendDirTail
+| Send [$1B $03 entry+$10..$1B $FF] (timestamp, size, header offset) and the final
+| [$10 $08 $00 $FF]. Out: ACC = 0 ok, $FF on error.
+@label_2446 .loop
+@label_2491 .return
+@label_24A6 .fail
+@label_24AB CopySendPage
+| FM_PRD the 128 bytes at FmBank/FmAddrHi/FmAddrLo into bank 1 $80-$FF and send it as
+| [$50 $04 data] from $7E (the two header bytes overwrite FmAddrHi/FmAddrLo, which are
+| saved and restored around the send). Out: ACC = 0 ok.
+@label_24D6 .return
+@label_24DD .fail
+@label_2560 CheckDataPacketEcho
+| After a data packet: the first two bytes looped back must still be $50 $04.
+@label_2575 .fail
+@label_25C3 SerialRestorePorts
+| Undo InitializeSerialIO: P1 back to its idle configuration, IP = 0, re-enable the
+| automatic battery check.
+@label_260E IsrSio1
+| SIO1 (receive) interrupt: store SBUF1 at bank 1 @R1++, re-arm, and stop receiving
+| (SCON1 = $04) when NBytesToReceive reaches 0.
+@label_2623 .return
+@label_2628 SwitchToCfClock
+| Start the ceramic (CF) oscillator while still running from RC (OCR $80), give it
+| ~100 loops to settle, then run from it: OCR = $12 (CF, 1/12, RC stopped).
+@label_2634 .delay
+@label_263B DrawCopyPrompt
+| File name on rows 0-1, "Copy ?" on row 2 and the Yes/No choice (No highlighted).
+@label_2656 .loop
+@label_2688 DrawCopied
+| "Copied" on row 2.
+@label_26C0 DrawNotEnoughMemory
+@label_26DC DrawSameFileExists
+@label_26F8 DrawConnectVmu
+| Clear the bottom half and draw "Connect VM" (the spinner supplies the "U").
++Str_CopyPrompt 2716
++Str_Copying 271F
++Str_Copied 2728
++Str_CopyFailed 2731
++Str_NotEnoughMemory 2744
++Str_SameFileExists 276B
++Str_UnableToCopy 2788
++Str_ConnectVm 279B
+
+// ============================================================ VMU-to-VMU copy, receiver
+@label_27AE CopyReceive
+| Another VMU was plugged in while browsing files. Show "Waiting for data", count the
+| free blocks and load the FAT into Maple work RAM (it is used as a 512-byte scratch
+| copy of the FAT for the whole transfer). Then wait for a header packet ($1x).
+| A+B together cancels.
+|   info packet  [$02 type size]: room check (free game blocks for $CC, free user
+|                blocks otherwise), answer $0A if it doesn't fit
+|   name packet  [$06 name(12)]: $0A if a data file with that name exists
+|   data packets: CopyReceiveBlocks writes them straight to newly allocated blocks
+|   tail packet  [$03 ...]: copied into the new directory entry
+|   done packet  [$08]: CopyCommitFile writes FAT + directory
+=27C7 FAT -> work RAM
+=27CC IP: SIO1 has priority
+@label_27D4 .waitHeader
+=27DE A+B held -> cancel
+@label_27F9 .cancel
+@label_27FE .abort
+@label_2800 .modeChanged
+@label_2802 .gotHeader
+=2806 payload length is in the low nibble
+=2816 ack the header byte with $E0
+=2838 packet type
+=2846 bank 1 $3D = blocks needed, $78/$79 = size for the directory entry
+=2858 data file: compare against free user blocks
+@label_2858 .dataFile
+@label_285A .checkRoom
+@label_2862 .reject
+@label_286B .accepted
+@label_2873 .expectName
+@label_287C .gotName
+=2884 game files always start at block 0
+@label_288D .checkUnique
+@label_2893 .receiveBlocks
+@label_289D .expectTail
+@label_28A6 .gotTail
+@label_28B0 .expectDone
+@label_28B9 .commit
+@label_28C3 .failed
+@label_28D3 .failedQuiet
+@label_28DE .disconnected
+@label_28E0 CopyCommitFile
+| Write the work-RAM FAT back to flash, then insert the new directory entry (bank 1
+| $60-$7B) into a free slot and program that page (3 tries; a bad page triggers
+| RelocateDirBlock). Answers $0C (ok) or $0A (failed) to the sender.
+| Out: ACC = 0 ok, $FF failed.
+@label_28EE .insertEntry
+@label_28F9 .writeDir
+@label_290B .ok
+@label_2918 .fail
+@label_2923 CopyReceiveCancel
+| A+B (or MODE) during receive: restore the ports and clock, back to the file manager.
+@label_2953 RecvAck
+| Send $0C ("ready") and receive the next packet (RecvPacket).
+@label_295B CopyReceiveBlocks
+| Receive NBlocksToWrite blocks. Game files take consecutive blocks from 0 and only if
+| the FAT entry at block 0 says $FFFC and the region is free; data files get blocks
+| allocated from 199 downwards (AllocDataBlock). Out: ACC = 0 ok.
+@label_2973 .fail
+@label_2975 .gameStart
+=2980 game data starts at flash $00000
+@label_298B .gameNext
+@label_2991 .dataNext
+@label_2997 .receiveBlock
+@label_29A7 .moreGame
+@label_29AA .ok
+@label_29B2 .fail2
+@label_29BA ReceiveBlockPages
+| Receive the four 128-byte pages of one block and program each one
+| (WritePageWithRetry). Out: ACC = 0 ok.
+@label_29C1 .page
+@label_29D2 .gotPage
+@label_29E5 .write
+@label_29F4 .badPage
+@label_29F9 .fail
+@label_2A01 CheckNameAndStage
+| FindDataFileByName; if no clash copy the received name into bank 1 $64 (staging
+| directory entry) and mark the first block ($62/$63) as not allocated yet ($FFFF).
+@label_2A0F .copy
+@label_2A25 .exists
+@label_2A29 StageDirTail
+| Copy the received tail (timestamp, size, header offset) to bank 1 $70.
+@label_2A32 .copy
+@label_2A3C AllocDataBlock
+| Find the highest free block below 200 in the work-RAM FAT, mark it end-of-chain,
+| link the previous block to it (or record it as the first block) and set
+| FmBank/FmAddrHi/FmAddrLo to its flash address. Out: ACC = 0 ok, $FF disk full.
+@label_2A46 .scan
+@label_2A52 .used
+@label_2A54 .next
+@label_2A67 .found
+@label_2A8C .first
+@label_2A96 .link
+@label_2AA6 .setAddress
+@label_2ACA .full
+@label_2AD0 AllocGameBlock
+| Claim the next consecutive block for a game file (must be free), link it from the
+| previous one and set FmBank/FmAddrHi/FmAddrLo. Out: ACC = 0 ok.
+@label_2B18 .fail
+@label_2B1E FindFreeDirSlot
+| Find the directory page (128 bytes, 4 entries) holding the first empty entry,
+| following the directory chain through the work-RAM FAT, and FM_PRD it into bank 1
+| $80-$FF. Out: ACC = 0 ok, $FF directory full/broken.
+@label_2B4E .block
+@label_2B51 .entry
+@label_2B7D .checkLink
+@label_2B81 .nextBlock
+@label_2B92 .found
+@label_2BAF .fail
+@label_2BB3 InsertDirEntry
+| Copy the staged entry (bank 1 $60-$7B, 28 bytes) into the first empty slot of the
+| page at bank 1 $80 and zero the last 4 bytes. Out: ACC = 0 ok.
+@label_2BB9 .find
+@label_2BC7 .copy
+@label_2BCD .loop
+@label_2BE4 .full
+@label_2BE8 WritePageWithRetry
+| FM_WRT + FM_VRF the page at FmBank/FmAddrHi/FmAddrLo up to 3 times, then advance
+| the address by 128. If it never verifies, the block is marked $FFFF (bad) in the
+| FAT and the FAT is written back. Out: ACC = 0 ok, $FF bad block.
+@label_2BEF .try
+@label_2C04 .ok
+@label_2C14 .return
+@label_2C19 .badBlock
+@label_2C3C RecvPacket
+| Wait for a header ($1x: length in the low nibble, stored at bank 1 $28) or data
+| ($5x: 130 bytes from bank 1 $7F) packet, ack its first byte with $E0 and receive
+| the rest through IsrSio1. Out: ACC = 0 ok, $FF if the other VMU went away.
+@label_2C53 .ignore
+@label_2C57 .header
+@label_2C7B .waitHeader
+@label_2C8C .fail
+@label_2C90 .data
+@label_2CAA .waitData
+@label_2CB8 SendStatusByte
+| Send the single byte in ACC ($0C ok/ready, $0A refused) and keep receiving.
+@label_2CCE ProgressBarInit
+| Draw a progress bar on the bottom rows (XRAM bank 1, from $C0), one pixel per block
+| plus 3.
+@label_2CDC .loop
+@label_2CE9 .nextByte
+@label_2CFA .newByte
+@label_2CFF .return
+@label_2D02 ProgressBarStep
+| Remove one pixel from the progress bar.
+@label_2D22 .return
+@label_2D27 UnusedTail_2D27
+| Unreachable leftover: the tail of some older prompt routine.
++Str_WaitingForData 2D6B
++Str_Receiving 2D88
+
+// ============================================================ delete
+@label_2DA5 FileDelete
+| "Delete ?" for the selected file. On Yes: free its FAT chain, erase its directory
+| entry (flash icon lit, battery check off meanwhile), select the previous file and
+| rescan the list.
+@label_2DB3 .loop
+@label_2DCA .cancel
+@label_2DCF .select
+@label_2DD5 .toggle
+@label_2DE3 .yes
+@label_2DFC .rescan
+@label_2DFF .exit
+@label_2E04 DrawDeletePrompt
+| File name on rows 0-1, "Delete ?" on row 2 and the Yes/No choice (No highlighted).
+@label_2E1F .loop
+@label_2E51 DrawDeleted
+| "Deleted" on row 2.
+@label_2E73 EraseDirEntry
+| Zero the 32-byte directory entry at TRH:TRL: FM_PRD its page, clear the entry in
+| bank 1, FM_WRT + FM_VRF up to 3 times; a page that never verifies goes through
+| RelocateDirBlock.
+@label_2E97 .try
+@label_2EA5 .clear
+@label_2ECE .return
+@label_2ED8 FreeFileBlocks
+| Mark every block of the file at TRH:TRL as free ($FFFC) in the work-RAM FAT, then
+| write the FAT back (WriteFatFromWram). FsError bit 3 if the chain is broken.
+@label_2EFE .first
+@label_2F01 .walk
+@label_2F25 .link
+@label_2F32 .free
+@label_2F44 .last
+@label_2F5A .return
+@label_2F68 .badEntry
+@label_2F70 .badChain
+@label_2F7A LoadFatToWram
+| Copy the 512-byte FAT block into Maple work RAM ($000-$1FF) via bank 1 $80-$FF,
+| 128 bytes at a time. Leaves the FAT flash address in bank 1 $54-$56.
+@label_2FA7 .page
+@label_2FC3 .next
+@label_2FCF WriteFatFromWram
+| Write the work-RAM FAT back to flash page by page; pages that already match are
+| skipped (FM_VRF first). A page that won't program after 3 tries makes
+| RelocateFatBlock move the FAT elsewhere and starts over. FsError bit 3 if even
+| that fails.
+@label_2FD7 .page
+@label_2FEE .next
+@label_300E .program
+@label_3036 .fail
+@label_303D RelocateFatBlock
+| The FAT block has gone bad: mark it $FFFF in the work-RAM FAT, pick the highest
+| free block below 200, mark it $FFFA, point root+$46 at it and rewrite the root block.
+| FsError bit 6 if the root block can't be written, bit 2 if there is no free block.
+@label_3069 .scan
+@label_3079 .next
+@label_3086 .found
+@label_30AF .writeRoot
+@label_30C0 .ok
+@label_30D1 .rootFailed
+@label_30DB .full
+@label_30E1 .return
+@label_30E8 RelocateDirBlock
+| A directory page at TRH:TRL won't program. Copy the whole directory block (with the
+| freshly modified page from bank 1 swapped in) to a free block in the 200-230 area,
+| relink it in place of the bad one (either root+$4A or the previous block's FAT
+| entry), mark the bad block $FFFF and write FAT/root back.
+| FsError: bit 2 no free block, bit 3 broken chain, bit 5/6 root or FAT write failed.
+@label_3115 .page
+@label_313C .swap
+@label_3140 .next
+@label_314E .advance
+@label_31B8 .findBlock
+@label_31CD .scan
+@label_31D4 .next
+@label_31E5 .found
+@label_321A .copyPage
+@label_322F .pageOk
+@label_32AE .relinkChain
+@label_32AF .walk
+@label_32C3 .compare
+@label_32D9 .continue
+@label_32DD .endOfChain
+@label_32A5 .rootUpdated
+@label_328E .writeRoot
+@label_32EA .writeFat
+@label_330B .tryFat
+@label_3319 .fatRetry
+@label_334E .reload
+@label_3371 .fatMoved
+@label_3376 .return
++Str_DeletePrompt 337D
++Str_Deleted 3386
+
+// ============================================================ hardware / math helpers
+@label_338F HardwareInit
+| Power-on peripheral setup: flash controller (FlashInit), interrupt enables and
+| priorities, base timer (0.5 s interrupt 0, fast interrupt 1 off), LCD controller
+| on, P1 idle, P3 as inputs with interrupts, SIO and timers stopped.
+=3392 IE: enable INT0/INT1 (IE.7, the master enable, is set below)
+=339E BTCR.0: base timer interrupt 0 (half-second) enabled
+=33A0 BTCR.6: base timer running
+=33A4 MCR $09: LCD on, graphics mode
+=33AD VCCR.7: LCD power on
+=33C7 P3INT: button interrupt enabled, wake from HALT
+@label_33E6 StartupBeep
+| Short beep at power-on: Timer 1 PWM on P1.7. Standalone it waits 3-4 half-second
+| ticks; in a controller it stops at the next tick.
+@label_33FD .wait
+@label_3407 .stop
+@label_3413 .inController
+@label_3424 .waitTick
+@label_342C FastTickOn
+| Enable base timer interrupt 1 (the fast tick used for key repeat) and let
+| BaseTimerIsr count it in FastTicks.
+@label_343D FastTickOff
+| Disable the fast tick again.
+@label_3448 .return
+@label_344B BcdToBin
+| ACC (two BCD digits) -> ACC binary. Uses MathHi as scratch.
+@label_3470 Bcd16ToBin
+| Four BCD digits at @R0 (high byte first) -> binary in MathHi:MathLo.
+@label_348C .thousands
+@label_3493 .subThousand
+@label_34A4 .hundreds
+@label_34B8 .tensDigit
+@label_34BA .tens
+@label_34C1 .subTen
+@label_34D2 .ones
+@label_34E6 .store
+@label_34FA BinToBcd
+| ACC (0-99) -> ACC as two BCD digits.
+@label_351A Bin16ToBcd
+| 16-bit binary at @R0 (high byte first, 0-9999) -> four BCD digits in MathHi:MathLo.
+@label_358D CopyBufToWram
+| Copy the 128-byte bank 1 buffer ($80-$FF) to work RAM at VRMAD (auto-increment).
+@label_3595 .loop
+@label_35AF CopyWramToBuf
+| Copy 128 bytes of work RAM at VRMAD into the bank 1 buffer ($80-$FF).
+@label_35B7 .loop
+@label_35D1 SwapBufWithWram
+| Exchange the bank 1 buffer ($80-$FF) with 128 bytes of work RAM at VRMAD, 32 bytes
+| at a time through bank 1 $10-$2F.
+@label_35DF .chunk
+@label_35E5 .save
+@label_3609 .fromWram
+@label_362C .toWram
+
+// ============================================================ input
+@label_364F WaitABReleased
+| Unreferenced: like WaitDpadReleased but for A/B.
+@label_3662 WaitDpadReleased
+| HALT until no d-pad direction is held (or the controller is plugged in).
+@label_3675 WaitAllButtonsReleased
+| HALT until no button at all is held (or the controller is plugged in).
+@Clear_User_RAM ClearUserRam
+| Zero all of RAM bank 1 (the application's bank).
+@label_368B .loop
+@label_3696 WaitKeyEvent
+| Main input routine for menus. HALTs until something happens and returns it in ACC:
+| A, B, Left, Right return immediately while held; Up/Down only on a half-second tick
+| (slow auto-repeat). System events ($FF/$FE/$FD/$FC, see CheckSystemEvents) win.
+| B on entry is overwritten with the current BiosMode (used to detect MODE).
+@label_36A0 .loop
+@label_36D3 .return
+@label_36D8 WaitKeyEventSlow
+| Like WaitKeyEvent, but only A/B are immediate; all four directions wait for a
+| half-second tick.
+@label_36E2 .loop
+@label_3715 .return
+@label_3718 WaitKeyEventRepeat
+| Like WaitKeyEvent with faster d-pad repeat: A/B immediate, directions once
+| FastTicks (base timer interrupt 1) has counted 4.
+@label_3727 .loop
+@label_375B .return
+@label_3760 CheckSystemEvents
+| Shared by the WaitKeyEvent family (B = BiosMode at entry). Out: ACC
+|   $FF  controller plugged in
+|   $FD  BiosMode changed (MODE was pressed)
+|   $FC  another VMU connected and CopyRxArm == 1, unless A alone is held
+|        (holding A suppresses it: CopyRxArm = $FF)
+|   $FE  sleep requested and SleepCtl says the caller handles it ($80 context)
+|   $00  nothing; auto-sleep/SLEEP may have been serviced in here (SleepUntilWake)
+| SleepCtl: bit0 toggled by SLEEP, $40 = never sleep here, $80 = return $FE.
+| IdleTicks wrapping to 0 (~2 minutes without a button) means auto-sleep.
+@label_377F .vmuConnected
+@label_3790 .startReceive
+@label_3794 .none
+@label_3798 .pluggedIn
+@label_379C .sleepCheck
+@label_37A2 .sleepRequested
+@label_37AB .sleepContext
+@label_37B8 .sleepHere
+@label_37C7 .sleepNoFastTick
+@label_37CE .modeChanged
+
+// ============================================================ drawing
+@label_37D2 DrawChar6x8
+| Draw ASCII character ACC from the 6x8 font at text cell (CursorX 0-7, CursorY 0-3).
+| Cells are 6 pixels wide, so they straddle XRAM bytes: the glyph is shifted into
+| place and merged with CellMaskLeft/CellMaskRight. TextInvert != 0 draws inverted.
+| Out-of-range cells are ignored. Preserves all registers.
+=37E2 OCR $81: XRAM is only writable on the RC clock
+=37EB font plane 0 = $E800 + character
+@label_37FC .checkRow
+@label_3806 .inRange
+@label_3835 .checkBank
+@label_383E .masks
+@label_386B .row
+@label_3881 .shift
+@label_3887 .shiftLoop
+@label_3896 .merge
+@label_38AA .nextLine
+@label_38C0 .nextPair
+@label_38CA .nextPlane
+@label_38CF .return
++CellMaskLeft 38E0
++CellMaskRight 38E8
+@label_38F0 DrawGlyph8x8
+| Draw big glyph ACC (FontGlyphs8x8) at 8x8 cell (CursorX 0-5, CursorY 0-3).
+| TextInvert != 0 draws inverted. Preserves all registers.
+@label_393C .normal
+@label_3950 .copy
+@label_396D .inverted
+@label_3975 .copyInv
+@label_3994 .return
+@label_39A1 ClearCell8x8
+| Blank one 8x8 cell (filled black instead if TextInvert != 0).
+@label_39CE .fill
+@label_39E4 .white
+@label_39E9 .loop
+@label_39FE .return
+!6925 6927 lit
+@DrawString DrawString
+| Draw a zero-terminated string with DrawChar6x8. $0D moves down a row, $0A back to
+| column 0 (so "\r\n" is a newline); text wraps from column 7 to column 0 of the
+| same row. Preserves registers and the cursor.
+@label_3A16 .loop
+@label_3A34 .return
+@label_3A41 .cr
+@label_3A50 .lf
+@label_3A55 DrawBcd16
+| Unreferenced: four BCD digits at @R0 in the 6x8 font.
+@label_3A97 DrawBcd3Digits
+| The low three BCD digits of @R0:@R0+1 in the 6x8 font (block counts).
+@label_3AD6 DrawHexByte
+| ACC as two hex digits in the 6x8 font (dates, error codes).
+@label_3B05 DrawBcdByteBig
+| ACC as two BCD digits in big 8x8 glyphs.
+@label_3B30 DrawBcd16Big
+| Four BCD digits at @R0 in big 8x8 glyphs (the year).
+@label_3B41 .loop
+@label_3B6E NibbleToHexAscii
+| ACC (0-15) -> '0'-'9' / 'a'-'f'.
+@label_3B76 .digit
+@label_3BA1 .skip
+@label_3BA9 ClearScreenAndIcons
+| Clear both XRAM banks, then write TextInvert to the 6 icon bytes in XBNK 2.
+@label_3BB7 .loop
+@label_3BCA .return
+@label_3BCD ClearHalfScreen
+| Clear the XRAM bank currently selected in XBNK (16 lines) to TextInvert.
+@label_3BD8 .loop
+@label_3C07 ClearScreen
+| Clear both halves of the LCD.
+
+// ============================================================ game mode / exit
+@label_3C12 GameModeLaunch
+| BiosMode 1, A pressed: light the game icon, check the root block is formatted and
+| that FindGame accepts the directory's game entry, then start it: quartz clock,
+| SP = $7F, RAM bank 1, toggle EXT.0 so instruction fetches come from flash, and
+| jump to flash $0000 (the game's reset vector).
+| Errors: "Format memory", "No saved game" (no $CC entry), "Game is damaged".
+@label_3C3A .checkFormat
+@label_3C46 .unformatted
+@label_3C4B .findGame
+@label_3C5C ExitToBios
+| EXIT_EX ($01F0) lands here when a game quits with MODE: reinitialise the hardware
+| and Maple, clear the game's RAM bank and return to MainMenu with the clock
+| selected (BiosMode 2, the mode after "game").
+@label_3C7A GameLaunchError
+@label_3C8F .noGame
+@label_3C97 .damaged
+@label_3C9D .draw
+@label_3CA8 .wait
+@label_3CB2 .exit
+@label_3CB7 FmWrtExGuard
+| FM_WRT_EX / FM_WRTA_EX ($0100/$0108) land here. A game may only write to its own
+| blocks: FmBank must be 0 and FmAddrHi <= 2 * GameLastBlock + 1 (the last page of
+| the game file), otherwise ACC = $FF and nothing is written. On success the
+| 128-byte page at bank 1 $80 is programmed (FM_WRT); FmAddrLo is rounded down to a
+| page boundary. The flash access icon is lit meanwhile. Out: ACC = 0 ok.
+| (Calling FlashLib's write at $E024 directly skips this check.)
+=3CC7 ACC = 2 * GameLastBlock + 1
+=3CCA GameLastBlock >= 128 (or 0, checked above): refuse
+@label_3CDE .return
+@label_3CE1 .refuse
+@label_3CE6 FindGame
+| Find the first game ($CC) directory entry and validate it: first block 0, size
+| 1-255 blocks, header offset 1-255 (the VMS header can't sit in block 0, that's
+| where the interrupt vectors go). Sets GameLastBlock = size - 1.
+| Out: ACC = 0 ok, $FE no game, $FD entry is inconsistent.
+@label_3D0E .block
+@label_3D11 .entry
+@label_3D17 .next
+@label_3D5D .nextBlock
+@label_3D6D .found
+@label_3D9B .none
+@label_3D9F .damaged
++Str_NoSavedGame 3DA3
++Str_GameDamaged 3DB6
+
+// ============================================================ ISRs
+@label_3DC9 BaseTimerIsr
+| Base timer interrupt; TIMER_EX ($0130) calls it too. Interrupt 1 (fast tick):
+| FastTicks++ while FastTickDisabled == 0. Interrupt 0 (every half second):
+|   - ClockTick (the date/time keeps running even while a game runs)
+|   - no button held -> remember the last state at $72, clear Buttons_Current
+|   - unless BatteryCheck == $FF, count ticks with P7.1 (battery OK) low in
+|     BatteryCheck; on the 6th:
+|     "Please change battery", then "return" into LowBatteryHalt by pushing $3E3E
+|     onto a fresh stack and executing RETI
+|   - IdleTicks++ (auto-sleep timeout) and HalfSecTicks++ (general timeouts)
+=3DCF the caller's PSW is restored on exit
+=3DE5 ClockTick
+=3DEE $72: previous button state (see the note at Buttons_Last below)
+=3E0A Str_ChangeBattery
+=3E1E fresh stack, fake return address $3E3E (LowBatteryHalt)
+@label_3DE0 .checkHalfSecond
+@label_3DF5 .checkBattery
+@label_3E2F .ticks
+@label_3E33 .return
+@label_3E3E LowBatteryHalt
+| Reached only through BaseTimerIsr's RETI trick, which is why a straight
+| disassembly finds no reference to it. Reinitialises everything, clears RAM bank 1
+| and sits in WaitKeyEvent: SLEEP still works, plugging into a controller goes to
+| MapleMode, everything else is ignored until the batteries are replaced.
+@P3_IRQ_Vector P3Isr
+| Button (P3) interrupt. IdleTicks = 1 (restart the auto-sleep timer), refresh
+| Buttons_Current (1 = pressed) and the newly-pressed mask; MODE cycles BiosMode
+| 0 -> 1 -> 2 -> 0 (any other value becomes 2), SLEEP toggles SleepCtl bit 0.
+| NOTE: see the Buttons_Last / Buttons_Diff definitions at the end of the file.
+@label_3EA7 MapleMode
+| The VMU is plugged into a controller (P7.0 high). Switch to the 6 MHz ceramic
+| oscillator, set up P1 for the Maple bus, reset the Maple hardware and spin;
+| all the work happens in MapleRxIsr. The Maple hardware is reset (and the screen
+| cleared) on a Maple bus reset (MAPLESTA.6) or when the P7.2-3 ID pins read back
+| as the complement of the latched MapleIdPins.
+| When the 5V disappears, go back to standalone operation (MapleModeExit).
+=3EB0 OCR $A2: quartz + CF running
+=3EB5 OCR $92: run from the CF oscillator
+@label_3ECB .loop
+@label_3EE2 .busReset
+@label_3EED MapleModeExit
+| Unplugged: restore P1, clear RAM bank 1, stop the buzzer, quartz clock, and drop
+| back into MainMenu in file mode with a sleep request pending (SleepCtl = 1).
++Str_ChangeBattery 3F16
+
+// ============================================================ flash library ($E000)
+@FlashLibTable FlashLibTable
+| Flash library jump table (Sanyo). Only some entries are used by the BIOS:
+|   $E000 FactoryFlashTest       $E003 FactoryFlashEndurance1  $E006 FactoryFlashEndurance2
+|   $E009 FactoryFlashCycles1    $E00C FactoryFlashPageTest    $E00F FactoryFlashCycles2
+|   $E012 FactoryFlashCycles3    $E015 FlashInit               $E018 FlashProgramPage
+|   $E01B FlashVerifyPage        $E01E FlashReadByteBank0      $E021 FlashReadByteBank1
+|   $E024 FlashWritePage         $E027 FlashReadPage           $E02A ClockTick
+|   $E02D UpdateLeapYear
+| Page routines work on 128 bytes: flash address FmBank:FmAddrHi:FmAddrLo, data in
+| bank 1 $80-$FF (R0 is used as the buffer pointer). They expect RAM bank 1.
+@label_E015 FlashInitEntry
+@label_E01B FlashVerifyEntry
+@label_E024 FlashWriteEntry
+@label_E027 FlashReadEntry
+@label_E02A ClockTickEntry
+@label_E02D UpdateLeapYearEntry
+@label_E100 FactoryFlashTest
+| Factory test (never called by the BIOS): fill all 128K of flash with $FF and
+| verify, then $00, then $FF again, reporting bad addresses on P3/P1, then STOP.
+@label_E12A .stop
+@label_E12E FactoryFill
+| Program every byte of both flash banks with B, waiting for the toggle bit at the
+| end of each 128-byte page.
+@label_E139 .bank
+@label_E13B .loop
+@label_E148 .next
+@label_E15C FactoryVerify
+| Compare all of flash against B. Each bad page's address is put on P3/P1 and the
+| routine handshakes with the tester via P7.0 before moving on.
+@label_E167 .bank
+@label_E169 .loop
+@label_E181 .waitHigh
+@label_E18A .waitLow
+@label_E196 .next
+@label_E1AC FlashWaitToggle
+| Wait for a flash program operation to finish: poll until DQ6 stops toggling.
+@label_E1B1 .loop
+@label_E1C1 FactoryFlashEndurance1
+| Factory endurance test: $1488 x (fill $00, fill $FF), then count mismatches,
+| show the pass count on P1 and the error count on P3; repeat until an error.
+@label_E1D6 .pass
+@label_E1DC .cycle
+@label_E1FF .stop
+@label_E203 FactoryFlashEndurance2
+| As FactoryFlashEndurance1 but never stops.
+@label_E218 .pass
+@label_E21E .cycle
+@label_E23F FactoryCountErrors
+| Count bad 128-byte pages (any byte != B) into $75:$76.
+@label_E250 .bank
+@label_E252 .loop
+@label_E25E .skipPage
+@label_E264 .next
+@label_E278 FactoryFlashCycles1
+| Factory test: $2810 x (fill $00, fill $FF), then STOP.
+@label_E284 .cycle
+@label_E296 .stop
+@label_E29A FactoryFlashPageTest
+| Factory test: program the first page with $00, then repeatedly verify 10 pages,
+| counting passes on P1, until one fails; then STOP.
+@label_E2BB .loop
+@label_E2CE .stop
+@label_E2D2 FactoryFillPage
+@label_E2E0 .wait
+@label_E2E4 FactoryVerifyPages
+@label_E2F6 .return
+@label_E2F7 FactoryFlashCycles2
+| Factory test: $C450 x (fill $00, fill $FF), then STOP.
+@label_E303 .cycle
+@label_E315 .stop
+@label_E319 FactoryFlashCycles3
+| Factory test: $01FC x (fill $00, fill $FF), then STOP.
+@label_E325 .cycle
+@label_E337 .stop
+@label_E33B FlashInit
+| Flash controller set-up done once by HardwareInit. Writes undocumented SFRs
+| ($155, $148, $151) and EXT bits 3/1.
+@label_E348 FlashProgramPage
+| Program the 128-byte bank 1 buffer into flash at FmBank:FmAddrHi:FmAddrLo (wrapping
+| within the page) and wait for completion: DQ7 data polling if FlashWaitMode.0 is
+| set, DQ6 toggle polling otherwise. The unlock sequence must already have been
+| issued (FlashWritePage does both).
+@label_E359 .loop
+@label_E36F .wait
+@label_E372 .dataPoll
+@label_E37A .toggle
+@label_E37F .toggleLoop
+@label_E387 .return
+@label_E388 FlashVerifyPage
+| FM_VRF_EX ($0110). Compare flash at FmBank:FmAddrHi:FmAddrLo with the bank 1 buffer.
+| Out: ACC = 0 if all 128 bytes match (R0 = $00), otherwise the XOR of the first
+| difference.
+@label_E397 .loop
+@label_E3A5 .next
+@label_E3AB .return
+@label_E3AC FlashReadByteBank0
+| Unreferenced: read the byte at bank 0 FmAddrHi:FmAddrLo into bank 1 $80.
+@label_E3BD FlashReadByteBank1
+| Unreferenced: same for flash bank 1.
+@label_E3CE FlashWritePage
+| FM_WRT. Issue the AMD-style unlock sequence ($AA -> $5555, $55 -> $2AAA,
+| $A0 -> $5555) with FPR.1 (write enable) set, then FlashProgramPage.
+| No range checking at all: this is what FmWrtExGuard protects.
+@label_E3D7 FlashUnlock
+@label_E3F6 FlashReadPage
+| FM_PRD_EX ($0120). Copy 128 bytes of flash at FmBank:FmAddrHi:FmAddrLo into the
+| bank 1 buffer at $80-$FF (TRL wraps, so the read stays inside one 256-byte page).
+@label_E405 .loop
+@label_E411 .return
+@label_E412 ClockTick
+| Called every half second by BaseTimerIsr. Every second tick advances the binary
+| date/time (Second..YearHi) with correct month lengths; on New Year it recomputes
+| LeapYear. The BCD copy at $10-$16 is NOT updated here.
+@label_E420 .second
+@label_E42C .minute
+@label_E438 .hour
+@label_E444 .day
+@label_E461 .month30
+@label_E468 .february
+@label_E473 .februaryLeap
+@label_E47A .nextMonth
+@label_E486 .nextYear
+@label_E491 .leap
+@label_E495 .halfSecond
+@label_E497 .return
+@label_E4A0 UpdateLeapYear
+| YearDiv4Hi:YearDiv4Lo = year / 4 and LeapYear = Gregorian leap year
+| (divisible by 4, and not by 100 unless by 400).
+@label_E4DE .notLeap
+@label_E4E1 .return
+
+// ============================================================ entry RAM banks
+^SerialTxMultiple 1
+^VerifyDataPostTx 1
+^label_2560 1
+^WaitUntilAllBytesSent 1
+^label_2CB8 1
+^label_2C3C 1
+^label_2953 1
+^label_295B 1
+^label_29BA 1
+^label_2A01 1
+^label_2A29 1
+^label_2A3C 1
+^label_2AD0 1
+^label_2B1E 1
+^label_2BB3 1
+^label_2BE8 1
+^label_2CCE 1
+^label_2D02 1
+^label_28E0 1
+^label_24AB 1
+^label_2FCF 1
+^label_303D 1
+^label_30E8 1
+^label_358D 1
+^label_35AF 1
+^label_35D1 1
+^label_E348 1
+^label_E388 1
+^label_E3F6 1
+^label_E3CE 1
+^label_E3D7 1
+^label_E3AC 1
+^label_E3BD 1
+^label_3CB7 1
+^label_E100 ?
+^label_E12E ?
+^label_E15C ?
+^label_E1AC ?
+^label_E1C1 ?
+^label_E203 ?
+^label_E23F ?
+^label_E278 ?
+^label_E29A ?
+^label_E2D2 ?
+^label_E2E4 ?
+^label_E2F7 ?
+^label_E319 ?
+^label_E33B ?
+
+@label_0220 .warmCandidate
+@label_02C2 .standalone
+@label_063B .replyResend
+@label_3E61 .sleep
+
+// ============================================================ RAM definitions block
+!9841 9864 lit
+|  ;; ===========================================================================
+|  ;; RAM definitions
+|  ;; ===========================================================================
+|  ;; Bank 0: BIOS system variables
+|BcdYearHi        = $10   ; BCD date/time copy (Maple/clock set, file timestamps)
+|BcdYearLo        = $11
+|BcdMonth         = $12
+|BcdDay           = $13
+|BcdHour          = $14
+|BcdMinute        = $15
+|BcdSecond        = $16
+|YearHi           = $17   ; binary date/time, advanced by ClockTick
+|YearLo           = $18
+|Month            = $19   ; 1-12
+|Day              = $1A   ; 1-31
+|Hour             = $1B   ; 0-23
+|Minute           = $1C   ; 0-59
+|Second           = $1D   ; 0-59
+|HalfSecond       = $1E   ; toggles every base timer tick; a second passes on 1 -> 0
+|LeapYear         = $1F   ; 1 if the current year is a leap year (UpdateLeapYear)
+|MapleMyAddr      = $20   ; our Maple address incl. port bits (latched from a device request)
+|MapleHostAddr    = $21   ; sender of the frame being answered
+|MapleAddrState   = $22   ; 0 = no address yet, $FF = addressed, $55 = killed
+|MapleIdPins      = $23   ; P7.2-3 when the address was derived
+|MapleLastCmd     = $24   ; last command handled / error reply sent, replayed on a resend request
+|MapleExpectedPhase = $25 ; storage block write: next expected phase (0-3)
+|MapleWriteBlock  = $26   ; storage block write: block number given in phase 0
+|MapleStorageErr  = $27   ; storage error bits (see MapleBlockToFlashAddr/MapleStorageBlockWrite)
+|MapleLcdErr      = $28   ; LCD block write error bits
+|MapleFuncType    = $29   ; function of the current frame: 2 storage, 4 LCD, 8 clock, $FF other
+|CopyRxArm        = $2B   ; VMU-to-VMU receive: 0 off, 1 armed, $FF suppressed
+|WarmBootMagic    = $2C   ; $2C-$2F = "REST" once RAM has been initialised
+|BiosMode         = $30   ; 0 file manager, 1 game, 2 clock
+|DateSet          = $31   ; $FF once the user (or the Dreamcast) has set the clock
+|ClockAnim        = $32   ; clock animation: bits 7-6 animal, 5 frame, 4 resting, 3-0 step
+|IdleTicks        = $33   ; reset to 1 by any button, +1 per half second; 0 = auto-sleep
+|HalfSecTicks     = $34   ; +1 per half second; cleared by code that wants a timeout
+|SleepCtl         = $35   ; bit0 SLEEP pressed, $40 = ignore sleep, $80 = caller handles it
+|FreeUserBlocksHi = $36   ; free blocks 0-199
+|FreeUserBlocks   = $37
+|FreeGameBlocksHi = $38   ; free blocks at the start of the volume (room for a game)
+|FreeGameBlocks   = $39
+|FileCountHi      = $3A   ; number of files (CountFiles)
+|FileCount        = $3B
+|SelectedFileHi   = $3C   ; file shown in the file manager (1-based)
+|SelectedFile     = $3D
+|FreeExtraBlocksHi = $3E  ; free blocks 200-230
+|FreeExtraBlocks  = $3F
+|YearDiv4Hi       = $50   ; year / 4 (UpdateLeapYear)
+|YearDiv4Lo       = $51
+|MathHi           = $52   ; result of the BCD/binary conversions and block-number scratch
+|MathLo           = $53
+|FatBank          = $54   ; flash address of the FAT block (FPR bit, high, low)
+|FatAddrHi        = $55
+|FatAddrLo        = $56
+|DirBlock         = $58   ; directory block being scanned
+|FsError          = $5C   ; filesystem error bits (shown as "System error xx")
+|CursorX          = $60   ; text cursor column
+|CursorY          = $61   ; text cursor row
+|TextInvert       = $67   ; $FF = draw inverted / clear to black
+|GameLastBlock    = $6D   ; last block of the game file (FmWrtExGuard limit)
+|BatteryCheck     = $6E   ; $FF = no low-battery check, else counts low-battery ticks
+|FlashBankTemp    = $6F   ; copy of FPR.0 for the current flash pointer
+|Buttons_Current  = $70   ; buttons held, 1 = pressed (see the overview)
+|  ;; NOTE: in the ROM, P3Isr stores the PREVIOUS state at $72 and the newly-pressed
+|  ;; mask at $71 (BaseTimerIsr also writes the previous state to $72). These two
+|  ;; definitions are swapped relative to that, so the P3Isr lines using them do not
+|  ;; assemble to the original bytes.
+|Buttons_Last     = $71
+|Buttons_Diff     = $72
+|FastTickDisabled = $73   ; 0 while FastTickOn is active
+|FastTicks        = $74   ; base timer interrupt 1 count (key repeat)
+|
+|  ;; Bank 1: application bank, firmware-call parameters, copy buffers
+|DataToTransmit   = $10   ; VMU-to-VMU: outgoing packet
+|CopyBlocksLeft   = $24   ; VMU-to-VMU send: blocks still to send
+|NBytesToVerify   = $25
+|NBytesToSend     = $26
+|DataTransmitted  = $28   ; VMU-to-VMU: bytes as actually shifted out / received packet
+|NBlocksToWrite   = $3D   ; VMU-to-VMU receive: blocks in the incoming file
+|NBytesToReceive  = $3E
+|RxPayloadSize    = $3F
+|FlashWaitMode    = $7C   ; bit0: FlashProgramPage waits with DQ7 polling instead of DQ6 toggle
+|FmBank           = $7D   ; firmware calls: flash address bit 16
+|FmAddrHi         = $7E   ; firmware calls: flash address bits 15-8
+|FmAddrLo         = $7F   ; firmware calls: flash address bits 7-0; data buffer at $80-$FF
+
+#101
+| An application calls these with CALLF from its own code in flash. The BIOS
+| routine runs from ROM, then "not1 ext, $00" flips instruction fetches back to
+| flash and the JMPF lands on the same address in flash, where the application's
+| copy of this table continues (normally with a RET). TIMER_EX returns to $0139.
+| Parameters live in RAM bank 1: FmBank/FmAddrHi/FmAddrLo ($7D-$7F) and the
+| 128-byte buffer at $80-$FF.
+=3DE8 any button held?
+=3DF7 BatteryCheck == $FF: battery check disabled
+=3DFC P7.1 = 1: battery voltage OK
+=3E00 count low-battery ticks
+=3E2F one more half second without a button press
+=3E6C any button: restart the auto-sleep timer
+=3E83 MODE: next mode
+=3E8D 3 wraps to 0, anything else (> 3) becomes 2
+=3E95 any unexpected value becomes clock mode
+=3E9E SLEEP: toggle the sleep request
+=3EA0 acknowledge the P3 interrupt
+=3DEE nothing held: previous state -> $72 (see the note at Buttons_Last), clear Buttons_Current
+=3E7F MODE newly pressed?
+=3E9A SLEEP newly pressed?
+=3E73 P3 is active low
+
+!3498 3499 lit
+|  ; String prefixes like $EF are ordinary 6x8 font glyphs: $EF bullet, $1A/$1B bold
+|  ; A/B button icons, $82 right arrow, $85 "No." sign, $17-$1A bold SEGA logo.
+!3056 3061 lit
+@CountFreeGameBlocks CountFreeGameBlocks
+| Count the free ($FFFC) FAT entries at the very start of the volume (blocks 0-127)
+| into FreeGameBlocks, stopping at the first used block: a game must occupy
+| consecutive blocks from block 0, while data files are allocated from the top.
+=3CB7 flash access icon on
+=3CB9 FmBank must be 0
+=3CBB refuse
+=3CBD GameLastBlock is in bank 0
+=3CC1 GameLastBlock
+=3CC5 no game file: refuse
+=3CCD FmAddrHi past the game's last page?
+=3CD2 round the address down to a page boundary
+=3CD8 FlashWritePage (FM_WRT)
+=0E0A length: 2 words
+=0E0D sender: us
+=0E11 recipient: the host
+=0E15 command $08: data transfer
+=0E1B function code $00000008 (clock), stored byte-reversed
+=0E2D raw P3, active low
+=0E2F MODE and SLEEP always read as released
+=0E33 hand work RAM back to the Maple hardware
+=0E35 MAPLETXRXCTL.4 + .0: send the reply
++FontAscii6x8 E800
+| 6x8 font for DrawChar6x8: 8 planes of 256 bytes, plane n holds pixel row n of every
+| character (bits 7-2 used). Besides ASCII it has the bold SEGA logo ($17-$1A, also
+| used as the A/B button icons $1A/$1B), arrows ($82), the "No." sign ($85), a
+| bullet ($EF) and the connector spinner frames ($F0-$F7).

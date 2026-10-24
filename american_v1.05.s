@@ -1,44 +1,89 @@
+;; =============================================================================
+;;  Sega Dreamcast Visual Memory Unit (VMU) BIOS, American v1.05 (1999/10/26)
+;;  "SEGA Visual Memory System BIOS Produced by Sue"   CPU: Sanyo LC86K87 (LC8670)
+;; =============================================================================
+;;
+;;  ROM MAP
+;;    $0000-$0062  interrupt vectors + trivial ISRs
+;;    $0100-$01F2  public firmware entry points (FM_WRT_EX, FM_PRD_EX, ...)
+;;    $0200-$3F32  the BIOS proper (menu, file manager, clock, Maple, VMU-to-VMU copy)
+;;    $4000-$7FFF  zero fill
+;;    $E000-$E02F  flash library jump table (Sanyo-supplied, BRF r16 each)
+;;    $E100-$E4E7  flash library: factory tests, page read/write/verify, clock tick
+;;    $E800-$EFFF  6x8 ASCII font, 8 planes of 256 bytes (plane n = pixel row n)
+;;
+;;  BIOS MODES (BiosMode, cycled by the MODE button in P3Isr: 0 -> 1 -> 2 -> 0)
+;;    0 = file manager, 1 = game (run the mini-game in flash), 2 = clock
+;;    The main menu (MainMenu) blinks the matching icon; pressing A enters it.
+;;    Plugging into a controller (P7.0 = 5V detect) always drops into MapleMode.
+;;
+;;  CONVENTIONS USED BELOW
+;;    Buttons_Current ($70) holds P3 inverted: 1 = pressed.
+;;      bit0 Up  bit1 Down  bit2 Left  bit3 Right  bit4 A  bit5 B  bit6 MODE  bit7 SLEEP
+;;    The WaitKeyEvent* family returns one of those button bits in ACC, or:
+;;      $FF  controller plugged in (P7.0 high), caller must bail to the main menu
+;;      $FE  SLEEP pressed in a context that wants to handle sleep itself
+;;      $FD  BiosMode changed (MODE pressed), caller must bail to the main menu
+;;      $FC  another VMU is plugged into the top connector -> start copy receive
+;;    Text cursor: CursorX ($60) / CursorY ($61). Small text is 8 columns x 4 rows of
+;;    6x8 cells, big glyphs are 6 columns x 4 rows of 8x8 cells. TextInvert ($67) = $FF
+;;    draws inverse video.
+;;    Flash addresses are 17 bits: FPR.0 (or FmBank/FlashBankTemp) is A16, TRH:TRL A15-A0.
+;;    A filesystem block is 512 bytes; block n lives at flash address n * $200.
+;;
+;;  FLASH FILESYSTEM (as the BIOS uses it)
+;;    Root block 255 ($1FE00): $00-$0F all $55 = formatted, $44 root loc, $46 FAT loc (254),
+;;    $4A directory loc (253), $4C directory size (13). FAT: 16-bit LE per block,
+;;    $FFFC = free, $FFFA = end of chain. Directory entries are 32 bytes:
+;;    +$00 type ($00 none, $33 data, $CC game), +$01 copy protect ($FF), +$02 first block,
+;;    +$04 name (12 chars), +$10 BCD timestamp (8), +$18 size in blocks, +$1A header offset.
+;;
+;;  RAM variables are named in the definitions at the end of this file. The BIOS keeps
+;;  its own state in bank 0; bank 1 is the application's bank and is also used for the
+;;  firmware-call parameters (FmBank/FmAddrHi/FmAddrLo at $7D-$7F, data buffer $80-$FF).
+;; =============================================================================
+;;
   ;; ========== INTERRUPT VECTOR TABLE ==========
   ;; Reset ISR
   .org 0
-  jmp   label_0200
+  jmp   ResetEntry
 
   .byte $FF
 
   ;; INT0 (external) ISR
   .org $0003
-  jmp   label_004F
+  jmp   IsrInt0
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
   ;; INT1 (external) ISR
   .org $000B
-  jmp   label_0052
+  jmp   IsrInt1
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
   ;; INT2 (external) OR Timer 0 T0L overflow ISR
   .org $0013
-  jmp   label_0055
+  jmp   IsrInt2Timer0Low
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
   ;; INT3 (external) OR Base Timer overflow ISR
   .org $001B
-  callf label_3DC9
+  callf BaseTimerIsr
   reti
 
   .byte $FF, $FF, $FF, $FF
 
   ;; Timer 0 T0H or T0H overflow ISR
   .org $0023
-  jmp   label_005A
+  jmp   IsrTimer0High
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
   ;; Timer 1 T1H or T1L overflow ISR
   .org $002B
-  jmp   label_005D
+  jmp   IsrTimer1
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF
 
@@ -51,37 +96,58 @@
 
   ;; SIO1 (Serial Port 1) ISR
   .org $003B
-  callf label_260E
+  callf IsrSio1
   reti
 
   .byte $FF, $FF, $FF, $FF
 
-  ;; RFB (VMU-to-VMU receive/detect) ISR
+ ;; Maple bus ISR (a Maple frame has arrived in work RAM)
   .org $0043
-  callf label_05E8
+  callf MapleRxIsr
   reti
 
   .byte $FF, $FF, $FF, $FF
 
   ;; P3 ISR
   .org $004B
-  callf P3_IRQ_Vector
+  callf P3Isr
   reti
 ;; ========== END INTERRUPT VECTOR TABLE ==========
-label_004F:
+;; -----------------------------------------------------------------------------
+;; IsrInt0 ($004F)
+;; External INT0: just acknowledge (clear I01CR.1). The BIOS doesn't use INT0.
+;; -----------------------------------------------------------------------------
+IsrInt0:
   clr1  i01cr, $01
   reti
-label_0052:
+;; -----------------------------------------------------------------------------
+;; IsrInt1 ($0052)
+;; External INT1: just acknowledge (clear I01CR.5).
+;; -----------------------------------------------------------------------------
+IsrInt1:
   clr1  i01cr, $05
   reti
-label_0055:
+;; -----------------------------------------------------------------------------
+;; IsrInt2Timer0Low ($0055)
+;; INT2 / Timer 0 low overflow: acknowledge both sources, nothing else.
+;; -----------------------------------------------------------------------------
+IsrInt2Timer0Low:
   clr1  t0con, $01
   clr1  i23cr, $05
   reti
-label_005A:
+;; -----------------------------------------------------------------------------
+;; IsrTimer0High ($005A)
+;; Timer 0 high overflow: acknowledge.
+;; -----------------------------------------------------------------------------
+IsrTimer0High:
   clr1  t0con, $03
   reti
-label_005D:
+;; -----------------------------------------------------------------------------
+;; IsrTimer1 ($005D)
+;; Timer 1 overflow: acknowledge both T1L and T1H flags. Timer 1 drives the buzzer
+;; in PWM mode, so this only fires if someone enables its interrupt.
+;; -----------------------------------------------------------------------------
+IsrTimer1:
   clr1  t1cnt, $01
   clr1  t1cnt, $03
   reti
@@ -98,21 +164,27 @@ label_005D:
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
 ;; ========== PUBLIC FIRMWARE SUBROUTINES ==========
+;; An application calls these with CALLF from its own code in flash. The BIOS
+;; routine runs from ROM, then "not1 ext, $00" flips instruction fetches back to
+;; flash and the JMPF lands on the same address in flash, where the application's
+;; copy of this table continues (normally with a RET). TIMER_EX returns to $0139.
+;; Parameters live in RAM bank 1: FmBank/FmAddrHi/FmAddrLo ($7D-$7F) and the
+;; 128-byte buffer at $80-$FF.
   ;; FM_WRT_EX (Write to Flash Memory)
   .org $0100
-  callf label_3CB7
+  callf FmWrtExGuard
   not1  ext, $00
   jmpf  $0105
 
   ;; FM_WRTA_EX (Write to Flash Memory)
   .org $0108
-  callf label_3CB7
+  callf FmWrtExGuard
   not1  ext, $00
   jmpf  $010B
 
   ;; FM_VRF_EX (Flash Memory Verify)
   .org $0110
-  callf label_E01B
+  callf FlashVerifyEntry
   not1  ext, $00
   jmpf  $0115
 
@@ -120,7 +192,7 @@ label_005D:
 
   ;; FM_PRD_EX (Flash Memory Page Data Readout)
   .org $0120
-  callf label_E027
+  callf FlashReadEntry
   not1  ext, $00
   jmpf  $0125
 
@@ -128,7 +200,7 @@ label_005D:
 
   ;; TIMER_EX (Base Timer/Clock 1/2 Second Clock Update)
   .org $0130
-  callf label_3DC9
+  callf BaseTimerIsr
   not1  ext, $00
   jmpf  $0139
 
@@ -136,7 +208,7 @@ label_005D:
 
   ;; SLEEP_EX (Sleep/CPU Halt)
   .org $0140
-  callf label_0421
+  callf SleepUntilWake
   not1  ext, $00
   jmpf  $0145
 
@@ -154,30 +226,43 @@ label_005D:
 
   ;; EXIT_EX (Mode Button)
   .org $01F0
-  brf   label_3C5C
+  brf   ExitToBios
 
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
 
 ;; ========== END PUBLIC FIRMWARE SUBROUTINES ==========
 
-label_0200:
-  mov   #$A3, ocr
+;; -----------------------------------------------------------------------------
+;; ResetEntry ($0200)
+;; Cold/warm reset. Brings up the hardware, plays the start-up beep and then decides
+;; whether RAM survives:
+;;   - Buttons_Current must read $F0 (A+B+MODE+SLEEP held; the P3 interrupt records
+;;     held buttons while StartupBeep waits)
+;;     AND WarmBootMagic ($2C-$2F) must already hold "REST" -> keep RAM (clock keeps
+;;     running), go straight to MaybeSetDefaultDate.
+;;   - otherwise clear both RAM banks and write "REST" to WarmBootMagic.
+;; Then reset the Maple hardware, and if the date was never set run the
+;; SetClock procedure before entering MainMenu.
+;; -----------------------------------------------------------------------------
+ResetEntry:
+  mov   #$A3, ocr                       ; OCR: 32kHz quartz, /6, RC + CF oscillators stopped
   mov   #$7F, sp        ; initialize stack pointer
   clr1  psw, rambk0     ; change to system RAM
   clr1  p3int, $00
-  mov   #$FF, $6E
-  mov   #$FF, $67
-  callf label_3BA9
-  callf label_338F
-  callf label_33E6
-  ld    $70
-  be    #$F0, label_0220
-  br    label_024C
-label_0220:
+  mov   #$FF, BatteryCheck              ; BatteryCheck = $FF: no low-battery check during boot
+  mov   #$FF, TextInvert                ; TextInvert = $FF, so ClearScreenAndIcons lights every icon (lamp test)
+  callf ClearScreenAndIcons
+  callf HardwareInit
+  callf StartupBeep
+  ld    Buttons_Current                 ; warm-boot key combo held?
+  be    #$F0, .warmCandidate
+  br    .coldBoot
+.warmCandidate:
+  ; compare WarmBootMagic against "REST" stored in ROM at Str_RestMagic ($05C3)
   mov   #$04, b
   mov   #$00, acc
-  mov   #$2C, $00
-label_0229:
+  mov   #WarmBootMagic, $00
+.checkMagic:
   push  b
   push  acc
   ld    @R0
@@ -185,25 +270,25 @@ label_0229:
   st    b
   pop   acc
   push  acc
-  mov   #$C3, trl
-  mov   #$05, trh
+  mov   #<Str_RestMagic, trl
+  mov   #>Str_RestMagic, trh
   ldc
   sub   b
-  bnz   label_024C
+  bnz   .coldBoot
   pop   acc
   inc   acc
   pop   b
-  dbnz  b, label_0229
-  br    label_0294
-label_024C:
+  dbnz  b, .checkMagic
+  br    .ramReady
+.coldBoot:
   mov   #$7F, sp
   mov   #$02, c
   clr1  psw, rambk0
   mov   #$00, acc
-label_0257:
+.clearBank:
   mov   #$00, $00
   mov   #$40, b
-label_025D:
+.clearLoop:
   st    @R0
   inc   $00
   st    @R0
@@ -212,155 +297,177 @@ label_025D:
   inc   $00
   st    @R0
   inc   $00
-  dbnz  b, label_025D
+  dbnz  b, .clearLoop
   mov   #$00, $00
-  set1  psw, rambk0
-  dbnz  c, label_0257
+  set1  psw, rambk0                     ; second pass clears bank 1
+  dbnz  c, .clearBank
+  ; write "REST" into WarmBootMagic so the next reset is a warm one
   clr1  psw, rambk0
-  mov   #$2C, $00
+  mov   #WarmBootMagic, $00
   mov   #$00, acc
   mov   #$04, b
-label_027F:
+.writeMagic:
   push  acc
-  mov   #$C3, trl
-  mov   #$05, trh
+  mov   #<Str_RestMagic, trl
+  mov   #>Str_RestMagic, trh
   ldc
   st    @R0
   pop   acc
   inc   $00
   inc   acc
-  dbnz  b, label_027F
+  dbnz  b, .writeMagic
   clr1  psw, rambk0
-label_0294:
-  mov   #$00, $70
-  mov   #$00, $67
-  callf label_1007
-  callf label_1017
-  clr1  vsel, $00
+.ramReady:
+  mov   #$00, Buttons_Current
+  mov   #$00, TextInvert
+  callf MapleHwReset                    ; MapleHwReset
+  callf MapleInitAddress                ; MapleInitAddress
+  clr1  vsel, $00                       ; VSEL: work RAM owned by the CPU, auto-increment off
   clr1  vsel, $01
-  clr1  mapletxrxctl, $02
-  mov   #$00, $6E
-  mov   #$00, $30
-  mov   #$00, $35
-label_02AF:
-  ld    $31
-  bnz   label_02EF
-  mov   #$00, $6C
-  callf label_1253
+  clr1  mapletxrxctl, $02               ; Maple receive disabled until MapleMode
+  mov   #$00, BatteryCheck              ; enable automatic low-battery check
+  mov   #$00, BiosMode
+  mov   #$00, SleepCtl
+;; -----------------------------------------------------------------------------
+;; MaybeSetDefaultDate ($02AF)
+;; If the date was never set (DateSet == 0), load 2000-01-01 00:00:00 and ask the
+;; user to set the clock. While plugged into a controller this is skipped and the
+;; BIOS goes straight to MapleMode.
+;; -----------------------------------------------------------------------------
+MaybeSetDefaultDate:
+  ld    DateSet
+  bnz   MainMenu
+  mov   #$00, $6C                       ; $6C is written here and never read anywhere else
+  callf InitDefaultDateTime             ; InitDefaultDateTime
   ld    p7
-  and   #$01
-  bz    label_02C2
-  jmpf  label_3EA7
-label_02C2:
+  and   #$01                            ; P7.0: controller 5V present?
+  bz    .standalone
+  jmpf  MapleMode
+.standalone:
   push  ocr
-  mov   #$81, ocr
-  mov   #$02, xbnk
+  mov   #$81, ocr                       ; OCR $81: RC oscillator so the XRAM icon writes work
+  mov   #$02, xbnk                      ; XBNK 2 = icon area: show only the clock icon
   mov   #$00, xram_0181
   mov   #$00, xram_0182
   mov   #$04, xram_0183
   mov   #$00, xram_0184
   mov   #$00, xbnk
   pop   ocr
-  mov   #$40, $35
-  callf label_129D
-  bnz   label_02EF
-  mov   #$FF, $31
-  mov   #$00, $6E
-  mov   #$00, $30
-  mov   #$00, $35
-label_02EF: ; lots of locations calls here, looks like a big deal
+  mov   #$40, SleepCtl                  ; SleepCtl $40: sleep button ignored while setting the clock
+  callf SetClockProcedure               ; SetClockProcedure; ACC != 0 if aborted (controller plugged in)
+  bnz   MainMenu
+  mov   #$FF, DateSet                   ; remember that the date has been set
+  mov   #$00, BatteryCheck
+  mov   #$00, BiosMode
+  mov   #$00, SleepCtl
+;; -----------------------------------------------------------------------------
+;; MainMenu ($02EF)
+;; Main menu / mode select. Draws the "Visual Memory Unit" banner, then idles in HALT,
+;; waking on every interrupt. MODE (handled in P3Isr) cycles BiosMode 0/1/2 and the
+;; matching icon blinks on every half-second tick; A enters the selected mode.
+;; Re-entered from almost everywhere when a mode exits, so it re-validates
+;; everything: controller plugged in -> MapleMode, date not set -> MaybeSetDefaultDate.
+;; -----------------------------------------------------------------------------
+MainMenu:
   clr1  psw, rambk0    ; BIOS RAM
   clr1  p3int, $00     ; P3 interrupts off
   ld    p7             ; get port 7 and isolate the 5V detect pin
   and   #$01
-  bnz   label_0337
-  ld    $31
-  bz    label_02AF
-  callf label_3BA9
-  mov   #$C7, trl
-  mov   #$05, trh     ; Load string "Visual Memory Unit"
-  mov   #$00, $60
-  mov   #$00, $61
+  bnz   .toMaple                        ; controller plugged in -> MapleMode
+  ld    DateSet
+  bz    MaybeSetDefaultDate             ; date never set -> back to the set-clock flow
+  callf ClearScreenAndIcons
+  mov   #<Str_VmuBanner, trl            ; Str_VmuBanner ($05C7)
+  mov   #>Str_VmuBanner, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
-  set1  p3int, $00
-  mov   #$01, $33
-  mov   #$00, SerialTimeout
-label_0317: ; 
-  set1  pcon, $00
+  set1  p3int, $00                      ; enable button interrupts
+  mov   #$01, IdleTicks                 ; IdleTicks = 1: restart the auto-sleep timeout
+  mov   #$00, HalfSecTicks
+.idle:
+  set1  pcon, $00                       ; HALT until the next interrupt (base timer, buttons, Maple)
   ld    p7
   and   #$01
-  bnz   label_0337
-  ld    $33
-  bz    label_0333
-  ld    $35
-  bnz   label_0333
-  ld    $30
-  bz    label_033A
-  be    #$01, label_0360
-  be    #$02, label_0387
-  br    label_0317
-label_0333:
-  call  label_0421
-  br    label_0317
+  bnz   .toMaple
+  ld    IdleTicks                       ; IdleTicks wrapped to 0 (~2 minutes idle) -> sleep
+  bz    .sleep
+  ld    SleepCtl                        ; SLEEP pressed -> sleep
+  bnz   .sleep
+  ld    BiosMode
+  bz    .fileSelected
+  be    #$01, .gameSelected
+  be    #$02, .clockSelected
+  br    .idle
+.sleep:
+  call  SleepUntilWake
+  br    .idle
 
-label_0337:
-  jmpf  label_3EA7
+.toMaple:
+  jmpf  MapleMode
 
-label_033A:
-  ld    $70
+.fileSelected:
+  ld    Buttons_Current                 ; A pressed?
   and   #$10
-  bnz   label_035E
-  ld    SerialTimeout
-  bz    label_0317
-  mov   #$00, SerialTimeout
+  bnz   .toFileManager
+  ld    HalfSecTicks                    ; half-second tick?
+  bz    .idle
+  mov   #$00, HalfSecTicks
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
-  not1  xram_0181, $06
+  not1  xram_0181, $06                  ; blink the file icon
   mov   #$00, xram_0182
   mov   #$00, xram_0183
   mov   #$00, xbnk
   pop   ocr
-  br    label_0317
-label_035E:
-  jmp   label_03AE
-label_0360:
-  ld    $70
+  br    .idle
+.toFileManager:
+  jmp   EnterFileManager
+.gameSelected:
+  ld    Buttons_Current
   and   #$10
-  bnz   label_0384
-  ld    SerialTimeout
-  bz    label_0317
-  mov   #$00, SerialTimeout
+  bnz   .toGame
+  ld    HalfSecTicks
+  bz    .idle
+  mov   #$00, HalfSecTicks
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
-  not1  xram_0182, $04
+  not1  xram_0182, $04                  ; blink the game icon
   mov   #$00, xram_0181
   mov   #$00, xram_0183
   mov   #$00, xbnk
   pop   ocr
-  br    label_0317
-label_0384:
-  jmpf  label_3C12
-label_0387:
-  ld    $70
+  br    .idle
+.toGame:
+  jmpf  GameModeLaunch
+.clockSelected:
+  ld    Buttons_Current
   and   #$10
-  bnz   label_03AB
-  ld    SerialTimeout
-  bz    label_0317
-  mov   #$00, SerialTimeout
+  bnz   .toClock
+  ld    HalfSecTicks
+  bz    .idle
+  mov   #$00, HalfSecTicks
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
-  not1  xram_0183, $02
+  not1  xram_0183, $02                  ; blink the clock icon
   mov   #$00, xram_0181
   mov   #$00, xram_0182
-  mov   #$02, xbnk
+  mov   #$02, xbnk                      ; BIOS bug: leaves XBNK at 2 here (the other two modes restore 0)
   pop   ocr
-  jmp   label_0317
-label_03AB:
-  jmpf  label_1034
-label_03AE:
+  jmp   .idle
+.toClock:
+  jmpf  ClockMode
+;; -----------------------------------------------------------------------------
+;; EnterFileManager ($03AE)
+;; A pressed with the file icon selected: light the file icon, check that the root
+;; block starts with 16 x $55 (formatted) and hand over to FileManager. Otherwise
+;; show "Format memory" until the mode changes or the controller is plugged in.
+;; The BIOS has no formatter, the Dreamcast does that.
+;; -----------------------------------------------------------------------------
+EnterFileManager:
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
@@ -369,81 +476,96 @@ label_03AE:
   mov   #$00, xram_0183
   mov   #$00, xbnk
   pop   ocr
-  mov   #$01, fpr
+  mov   #$01, fpr                       ; FPR.0 = 1: root block lives in the upper 64K
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$00, trl
   mov   #$10, b
-label_03D3:
+.checkFormat:
   ldf
   xor   #$55
-  bnz   label_03E1
-  dbnz  b, label_03D3
-  mov   #$00, $2B
-  jmpf  label_196F
-label_03E1:
+  bnz   .notFormatted
+  dbnz  b, .checkFormat
+  mov   #$00, CopyRxArm                 ; CopyRxArm = 0: don't offer VMU-to-VMU receive yet
+  jmpf  FileManager
+.notFormatted:
   clr1  p3int, $00
-  callf label_3C07
-  mov   #$0E, trl
-  mov   #$04, trh   ; Load string "Format memory"
-  mov   #$00, $60
-  mov   #$00, $61
+  callf ClearScreen
+  mov   #<Str_FormatMemory, trl         ; Str_FormatMemory
+  mov   #>Str_FormatMemory, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
   set1  p3int, $00
-  mov   #$01, $33
-label_03FA:
-  callf label_3696
-  be    #$FF, label_0408
-  be    #$FD, label_0408
-  be    #$FE, label_040A
-  br    label_03FA
-label_0408:
-  jmp   label_02EF
-label_040A:
-  call  label_0421
-  br    label_03FA
+  mov   #$01, IdleTicks
+.waitLoop:
+  callf WaitKeyEvent
+  be    #$FF, .exit
+  be    #$FD, .exit
+  be    #$FE, .sleep
+  br    .waitLoop
+.exit:
+  jmp   MainMenu
+.sleep:
+  call  SleepUntilWake
+  br    .waitLoop
 
+Str_FormatMemory:
   .byte $46, $6F, $72, $6D, $61, $74, $20, $20, $0D, $0A, $20, $20, $6D, $65, $6D, $6F
   .byte $72, $79, $00
 
-label_0421:
+;; -----------------------------------------------------------------------------
+;; SleepUntilWake ($0421)
+;; SLEEP_EX ($0140) lands here too. Turns the LCD off (VCCR/MCR = 0), waits for all
+;; buttons to be released, then HALTs until SLEEP is pressed again. Preserves
+;; BiosMode and BatteryCheck. If the VMU gets plugged into a controller while asleep
+;; it doesn't return: it resets SP and enters MapleMode.
+;; -----------------------------------------------------------------------------
+SleepUntilWake:
   push  acc
   push  psw
   clr1  psw, rambk0
-  push  $30
-  push  $6E
-  mov   #$FF, $6E
-  mov   #$00, vccr
+  push  BiosMode
+  push  BatteryCheck
+  mov   #$FF, BatteryCheck              ; no battery nagging while asleep
+  mov   #$00, vccr                      ; LCD off
   mov   #$00, mcr
-  callf label_3675
+  callf WaitAllButtonsReleased          ; WaitAllButtonsReleased
   set1  p3int, $00
-label_0439:
+.halt:
   set1  pcon, $00
   ld    p7
   and   #$01
-  bnz   label_045C
-  ld    $70
+  bnz   .pluggedIn
+  ld    Buttons_Current                 ; SLEEP pressed again?
   and   #$80
-  bz    label_0439
-  mov   #$09, mcr
+  bz    .halt
+  mov   #$09, mcr                       ; LCD back on
   mov   #$80, vccr
-  mov   #$00, $35
-  mov   #$01, $33
-  pop   $6E
-  pop   $30
+  mov   #$00, SleepCtl                  ; clear the sleep request, restart idle timeout
+  mov   #$01, IdleTicks
+  pop   BatteryCheck
+  pop   BiosMode
   pop   psw
   pop   acc
   ret
-label_045C:
+.pluggedIn:
   mov   #$09, mcr
   mov   #$80, vccr
-  mov   #$00, $35
-  mov   #$00, $30
-  mov   #$FF, $6E
+  mov   #$00, SleepCtl
+  mov   #$00, BiosMode
+  mov   #$FF, BatteryCheck
   clr1  psw, rambk0
   mov   #$7F, sp
-  jmpf  label_3EA7
+  jmpf  MapleMode
 
+;; -----------------------------------------------------------------------------
+;; FontGlyphs8x8 ($0473)
+;; 8x8 glyphs used by DrawGlyph8x8 (8 bytes each, MSB = leftmost pixel):
+;;   $00-$09 '0'-'9'   $0A ':'   $0B down-triangle   $0C up-triangle
+;;   $0D-$0F '/' (three copies)   $10-$29 'A'-'Z'
+;; -----------------------------------------------------------------------------
+FontGlyphs8x8:
   .byte $7C, $C6, $C6, $C6, $C6, $C6, $7C, $00, $18, $38, $18, $18, $18, $18, $3C, $00
   .byte $7C, $C6, $C6, $1C, $70, $C0, $FE, $00, $7C, $C6, $C6, $1C, $C6, $C6, $7C, $00
   .byte $C0, $D8, $D8, $D8, $FE, $18, $3C, $00, $FE, $C0, $FC, $06, $C6, $C6, $7C, $00
@@ -465,13 +587,48 @@ label_045C:
   .byte $C6, $C6, $C6, $C6, $C6, $C6, $7C, $00, $C6, $C6, $C6, $6C, $6C, $38, $10, $00
   .byte $C6, $C6, $D6, $D6, $FE, $EE, $C6, $00, $C6, $C6, $6C, $38, $6C, $C6, $C6, $00
   .byte $CC, $CC, $CC, $78, $30, $30, $30, $00, $FE, $06, $0C, $38, $60, $C0, $FE, $00
-  .byte $52, $45, $53, $54, $20, $20, $17, $18, $19, $1A, $0D, $0A, $20, $56, $69, $73
+;; -----------------------------------------------------------------------------
+;; Str_RestMagic ($05C3)
+;; "REST" (warm-boot magic). Str_VmuBanner starts right after it; bytes $17-$1A
+;; are the bold "SEGA" logo characters of the 6x8 font.
+;; -----------------------------------------------------------------------------
+Str_RestMagic:
+  .byte $52, $45, $53, $54
+Str_VmuBanner:
+  .byte $20, $20, $17, $18, $19, $1A, $0D, $0A, $20, $56, $69, $73
   .byte $75, $61, $6C, $0D, $0A, $20, $4D, $65, $6D, $6F, $72, $79, $0D, $0A, $20, $20
   .byte $55, $6E, $69, $74, $00
 
 ; ===== MAPLE FRAME RX ENTRY POINT ======
-label_05E8:
-  clr1  vsel, $00
+;; -----------------------------------------------------------------------------
+;; MapleRxIsr ($05E8)
+;; Maple bus interrupt: a complete frame from the Dreamcast is sitting in the
+;; 512-byte work RAM (read through VRMAD/VTRBF). The frame header word is stored
+;; byte-reversed: WRAM+3 = command, +2 = recipient address, +1 = sender address,
+;; +0 = payload length in 32-bit words. Payload words follow from WRAM+4.
+;;
+;; Until we know our own address (MapleAddrState == 0) only a Device Request (1)
+;; addressed to our port/slot is accepted; that latches MapleMyAddr. After a Device
+;; Kill (4) MapleAddrState is $55 and every frame is ignored.
+;; Function codes handled (MapleFuncType, see MapleParseFunctionCode):
+;;   $02 storage (flash), $04 LCD, $08 clock (timer, buttons, buzzer).
+;; Commands:
+;;   $01 device request       -> MapleCmdDeviceInfo   (reply $05)
+;;   $02 all status request   -> MapleCmdAllStatus    (reply $06)
+;;   $03 device reset         -> MapleCmdReset        (reply $07)
+;;   $04 device kill          -> MapleCmdKill         (reply $07)
+;;   $09 get condition        -> clock: MapleClockGetCondition (buttons)
+;;   $0A get media info       -> storage/LCD media info
+;;   $0B block read           -> storage: MapleStorageBlockRead, clock: MapleClockBlockRead
+;;   $0C block write          -> storage/LCD/clock block write
+;;   $0D get last error       -> MapleStorageGetLastError (end of a block write)
+;;   $0E set condition        -> clock: MapleClockSetCondition (buzzer)
+;;   $FC resend request       -> MapleResendLastReply
+;; Anything else gets $FD (unknown command); unsupported functions get $FE;
+;; malformed frames (bad length) get $FC (please resend).
+;; -----------------------------------------------------------------------------
+MapleRxIsr:
+  clr1  vsel, $00                       ; hand work RAM to the CPU
   push  acc
   push  b
   push  c
@@ -479,139 +636,139 @@ label_05E8:
   push  $01
   push  $02
   push  $03
-  ld    maplesta
+  ld    maplesta                        ; MAPLESTA error bits (5, 4, 1) set?
   and   #$76
   st    b
-  bp    acc, $05, label_062F
-  bp    acc, $04, label_062F
-  bp    acc, $01, label_062F
-  ld    $22
-  bnz   label_063F
-  mov   #$03, vrmad1
+  bp    acc, $05, .frameError
+  bp    acc, $04, .frameError
+  bp    acc, $01, .frameError
+  ld    MapleAddrState                  ; do we know our address yet?
+  bnz   .addressKnown
+  mov   #$03, vrmad1                    ; WRAM+3: command
   clr1  vrmad2, $00
   ld    vtrbf
-  be    #$01, label_0617
-  jmp   label_07D8
-label_0617:
-  mov   #$02, vrmad1
+  be    #$01, .checkRecipient
+  jmp   .done
+.checkRecipient:
+  mov   #$02, vrmad1                    ; WRAM+2: recipient address
   ld    vtrbf
   st    c
   and   #$3F
-  sub   $20
-  bz    label_0626
-  jmp   label_07D8
-label_0626:
-  ld    c
-  st    $20
-  mov   #$FF, $22
-  jmp   label_0646
-label_062F:
-  ld    $22
-  bnz   label_0635
-  jmp   label_07D8
-label_0635:
-  call  label_07EB
-  bz    label_063B
-  jmp   label_07D8
-label_063B:
-  call  label_0800
-  jmp   label_07D8
-label_063F:
-  ld    $22
-  bne   #$55, label_0646
-  jmp   label_07D8
-label_0646:
-  call  label_07EB
-  bz    label_064C
-  jmp   label_07D8
-label_064C:
+  sub   MapleMyAddr                     ; our port/slot bits?
+  bz    .latchAddress
+  jmp   .done
+.latchAddress:
+  ld    c                               ; latch recipient address (with the port bits) as ours
+  st    MapleMyAddr
+  mov   #$FF, MapleAddrState
+  jmp   .dispatch
+.frameError:
+  ld    MapleAddrState
+  bnz   .frameErrorForUs
+  jmp   .done
+.frameErrorForUs:
+  call  MapleCheckRecipient
+  bz    .replyResend
+  jmp   .done
+.replyResend:
+  call  MapleReplyResend
+  jmp   .done
+.addressKnown:
+  ld    MapleAddrState
+  bne   #$55, .dispatch                 ; $55 = killed (device kill): ignore everything
+  jmp   .done
+.dispatch:
+  call  MapleCheckRecipient
+  bz    .addressedToUs
+  jmp   .done
+.addressedToUs:
   mov   #$03, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bne   #$01, label_066A
+  bne   #$01, .cmd2
+  mov   #$00, vrmad1                    ; WRAM+0: payload length must be 0
+  clr1  vrmad2, $00
+  ld    vtrbf
+  bnz   .badLength1
+  mov   #$01, MapleLastCmd
+  call  MapleCmdDeviceInfo
+  jmp   .done
+.badLength1:
+  call  MapleReplyResend
+  jmp   .done
+.cmd2:
+  bne   #$02, .cmd3
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bnz   label_0666
-  mov   #$01, $24
-  call  label_08B9
-  jmp   label_07D8
-label_0666:
-  call  label_0800
-  jmp   label_07D8
-label_066A:
-  bne   #$02, label_0681
+  bnz   .badLength2
+  mov   #$02, MapleLastCmd
+  call  MapleCmdAllStatus
+  jmp   .done
+.badLength2:
+  call  MapleReplyResend
+  jmp   .done
+.cmd3:
+  bne   #$03, .cmd4
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bnz   label_067D
-  mov   #$02, $24
-  call  label_090F
-  jmp   label_07D8
-label_067D:
-  call  label_0800
-  jmp   label_07D8
-label_0681:
-  bne   #$03, label_0698
+  bnz   .badLength3
+  mov   #$FF, MapleLastCmd
+  call  MapleCmdReset
+  jmp   .done
+.badLength3:
+  call  MapleReplyResend
+  jmp   .done
+.cmd4:
+  bne   #$04, .cmdA
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bnz   label_0694
-  mov   #$FF, $24
-  call  label_0962
-  jmp   label_07D8
-label_0694:
-  call  label_0800
-  jmp   label_07D8
-label_0698:
-  bne   #$04, label_06AF
+  bnz   .badLength4
+  mov   #$FF, MapleLastCmd
+  call  MapleCmdKill
+  jmp   .done
+.badLength4:
+  call  MapleReplyResend
+  jmp   .done
+.cmdA:
+  bne   #$0A, .cmdB
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bnz   label_06AB
-  mov   #$FF, $24
-  call  label_0970
-  jmp   label_07D8
-label_06AB:
-  call  label_0800
-  jmp   label_07D8
-label_06AF:
-  bne   #$0A, label_06D7
+  bne   #$02, .badLengthA               ; 2 words: function code + partition
+  mov   #$0A, MapleLastCmd
+  call  MapleParseFunctionCode
+  ld    MapleFuncType
+  be    #$02, .mediaInfoStorage
+  be    #$04, .mediaInfoLcd
+  jmp   .unsupportedFunction
+.mediaInfoStorage:
+  call  MapleStorageGetMediaInfo
+  jmp   .done
+.mediaInfoLcd:
+  call  MapleLcdGetMediaInfo
+  jmp   .done
+.badLengthA:
+  call  MapleReplyResend
+  jmp   .done
+.cmdB:
+  bne   #$0B, .cmdC
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bne   #$02, label_06D3
-  mov   #$0A, $24
-  call  label_0827
-  ld    $29
-  be    #$02, label_06CB
-  be    #$04, label_06CF
-  jmp   label_07D4
-label_06CB:
-  call  label_09BB
-  jmp   label_07D8
-label_06CF:
-  call  label_0A6A
-  jmp   label_07D8
-label_06D3:
-  call  label_0800
-  jmp   label_07D8
-label_06D7:
-  bne   #$0B, label_0735
-  mov   #$00, vrmad1
-  clr1  vrmad2, $00
-  ld    vtrbf
-  bne   #$02, label_0731
-  mov   #$0B, $24
-  call  label_0827
-  ld    $29
-  be    #$02, label_06F7
-  be    #$08, label_06F3
-  jmp   label_07D4
-label_06F3:
-  call  label_0BFE
-  jmp   label_07D8
-label_06F7:
+  bne   #$02, .badLengthB
+  mov   #$0B, MapleLastCmd
+  call  MapleParseFunctionCode
+  ld    MapleFuncType
+  be    #$02, .blockReadStorage
+  be    #$08, .blockReadClock
+  jmp   .unsupportedFunction
+.blockReadClock:
+  call  MapleClockBlockRead
+  jmp   .done
+.blockReadStorage:
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   set1  psw, rambk0
@@ -621,7 +778,7 @@ label_06F7:
   inc   $00
   mov   #$04, vrmad1
   mov   #$02, b
-label_070C:
+.copyLocation:
   ld    vtrbf
   st    @R0
   inc   $00
@@ -634,105 +791,105 @@ label_070C:
   ld    vtrbf
   st    @R0
   inc   $00
-  dbnz  b, label_070C
+  dbnz  b, .copyLocation
   clr1  psw, rambk0
-  mov   #$00, NBytesToVerify
-  mov   #$00, $27
-  call  label_0858
-  call  label_0B7D
-  jmp   label_07D8
-label_0731:
-  call  label_0800
-  jmp   label_07D8
-label_0735:
-  bne   #$0C, label_0756
-  mov   #$0C, $24
-  call  label_0827
-  ld    $29
-  be    #$04, label_074C
-  be    #$08, label_0750
-  bne   #$02, label_0754
-  call  label_0C5B
-  jmp   label_07D8
-label_074C:
-  call  label_0D02
-  jmp   label_07D8
-label_0750:
-  call  label_0DBD
-  jmp   label_07D8
-label_0754:
-  jmp   label_07D4
-label_0756:
-  bne   #$0D, label_0787
+  mov   #$00, MapleExpectedPhase
+  mov   #$00, MapleStorageErr
+  call  MapleBlockToFlashAddr
+  call  MapleStorageBlockRead
+  jmp   .done
+.badLengthB:
+  call  MapleReplyResend
+  jmp   .done
+.cmdC:
+  bne   #$0C, .cmdD
+  mov   #$0C, MapleLastCmd
+  call  MapleParseFunctionCode
+  ld    MapleFuncType
+  be    #$04, .blockWriteLcd
+  be    #$08, .blockWriteClock
+  bne   #$02, .unsupportedC
+  call  MapleStorageBlockWrite
+  jmp   .done
+.blockWriteLcd:
+  call  MapleLcdBlockWrite
+  jmp   .done
+.blockWriteClock:
+  call  MapleClockBlockWrite
+  jmp   .done
+.unsupportedC:
+  jmp   .unsupportedFunction
+.cmdD:
+  bne   #$0D, .cmdFC
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  be    #$02, label_0767
-  call  label_0800
-  jmp   label_07D8
-label_0767:
-  mov   #$0D, $24
-  call  label_0827
-  ld    $29
-  bne   #$02, label_0785
-  mov   #$0A, vrmad1
+  be    #$02, .getLastError
+  call  MapleReplyResend
+  jmp   .done
+.getLastError:
+  mov   #$0D, MapleLastCmd
+  call  MapleParseFunctionCode
+  ld    MapleFuncType
+  bne   #$02, .unsupportedD
+  mov   #$0A, vrmad1                    ; WRAM+$0A: phase of the write being finished
   clr1  vrmad2, $00
   ld    vtrbf
-  sub   $25
-  bz    label_077E
-  set1  $27, $01
-label_077E:
-  mov   #$00, $25
-  call  label_0E5D
-  jmp   label_07D8
-label_0785:
-  jmp   label_07D4
-label_0787:
-  bne   #$FC, label_078E
-  call  label_0E6F
-  jmp   label_07D8
-label_078E:
-  bne   #$09, label_07AF
-  mov   #$09, $24
+  sub   MapleExpectedPhase
+  bz    .phaseOk
+  set1  MapleStorageErr, $01
+.phaseOk:
+  mov   #$00, MapleExpectedPhase
+  call  MapleStorageGetLastError
+  jmp   .done
+.unsupportedD:
+  jmp   .unsupportedFunction
+.cmdFC:
+  bne   #$FC, .cmd9
+  call  MapleResendLastReply
+  jmp   .done
+.cmd9:
+  bne   #$09, .cmdE
+  mov   #$09, MapleLastCmd
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bne   #$01, label_07A9
-  call  label_0827
-  ld    $29
-  bne   #$08, label_07AD
-  call  label_0E08
-  jmp   label_07D8
-label_07A9:
-  call  label_0800
-  jmp   label_07D8
-label_07AD:
-  jmp   label_07D4
-label_07AF:
-  bne   #$0E, label_07D0
-  mov   #$0E, $24
+  bne   #$01, .badLength9
+  call  MapleParseFunctionCode
+  ld    MapleFuncType
+  bne   #$08, .unsupported9
+  call  MapleClockGetCondition
+  jmp   .done
+.badLength9:
+  call  MapleReplyResend
+  jmp   .done
+.unsupported9:
+  jmp   .unsupportedFunction
+.cmdE:
+  bne   #$0E, .unknownCommand
+  mov   #$0E, MapleLastCmd
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bne   #$02, label_07CA
-  call  label_0827
-  ld    $29
-  bne   #$08, label_07CE
-  call  label_0E3A  ; Play maple buzzer
-  jmp   label_07D8
-label_07CA:
-  call  label_0800
-  jmp   label_07D8
-label_07CE:
-  jmp   label_07D4
-label_07D0:
-  call  label_097B
-  jmp   label_07D8
-label_07D4:
-  call  label_099B
-  jmp   label_07D8
-label_07D8:
-  clr1  maplesta, $02
+  bne   #$02, .badLengthE
+  call  MapleParseFunctionCode
+  ld    MapleFuncType
+  bne   #$08, .unsupportedE
+  call  MapleClockSetCondition  ; Play maple buzzer
+  jmp   .done
+.badLengthE:
+  call  MapleReplyResend
+  jmp   .done
+.unsupportedE:
+  jmp   .unsupportedFunction
+.unknownCommand:
+  call  MapleReplyUnknownCommand
+  jmp   .done
+.unsupportedFunction:
+  call  MapleReplyFunctionUnsupported
+  jmp   .done
+.done:
+  clr1  maplesta, $02                   ; acknowledge the frame
   pop   $03
   pop   $02
   pop   $01
@@ -740,32 +897,41 @@ label_07D8:
   pop   c
   pop   b
   pop   acc
-  set1  vsel, $00
+  set1  vsel, $00                       ; give work RAM back to the Maple hardware
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_07EB:
+;; -----------------------------------------------------------------------------
+;; MapleCheckRecipient ($07EB)
+;; Out: ACC = MapleMyAddr - recipient (0 if the frame is for us), B = recipient.
+;; Also latches the sender into MapleHostAddr for the reply.
+;; -----------------------------------------------------------------------------
+MapleCheckRecipient:
   mov   #$02, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
   st    b
   mov   #$01, vrmad1
   ld    vtrbf
-  st    $21
-  ld    $20
+  st    MapleHostAddr
+  ld    MapleMyAddr
   sub   b
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_0800:
-  call  label_081D
+;; -----------------------------------------------------------------------------
+;; MapleReplyResend ($0800)
+;; Reply with command $FC ("request resend"), no payload. Used for malformed frames.
+;; -----------------------------------------------------------------------------
+MapleReplyResend:
+  call  MapleBeginReply
   mov   #$00, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$FC, vtrbf
-  mov   #$FC, $24
+  mov   #$FC, MapleLastCmd
   mov   #$00, vlreg
   set1  vsel, $00
   set1  mapletxrxctl, $04
@@ -773,82 +939,97 @@ label_0800:
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_081D: ; set WRAM to reply a MAPLE packet, called from around 20 locals
+;; -----------------------------------------------------------------------------
+;; MapleBeginReply ($081D)
+;; Point work RAM at $100 (the transmit half) with the CPU owning it, ready to write
+;; a reply header with successive VTRBF stores.
+;; -----------------------------------------------------------------------------
+MapleBeginReply:
   clr1  vsel, $00          ; WRAM is set to be accessed by CPU
-  clr1  mapletxrxctl, $04  ; no idea
-  mov   #$00, vrmad1       ; set address to $100
+  clr1  mapletxrxctl, $04               ; MAPLETXRXCTL.4 off while building the reply
+  mov   #$00, vrmad1                    ; VRMAD = $100
   set1  vrmad2, $00
   ret
 
-
-
-
-label_0827:
+;; -----------------------------------------------------------------------------
+;; MapleParseFunctionCode ($0827)
+;; Decode the first payload word (function code, WRAM+4..7) into MapleFuncType:
+;; $02 storage, $04 LCD, $08 clock, $FF anything else (or more than one bit set).
+;; -----------------------------------------------------------------------------
+MapleParseFunctionCode:
   mov   #$05, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bnz   label_0854
+  bnz   .unsupported
   ld    vtrbf
-  bnz   label_0854
+  bnz   .unsupported
   ld    vtrbf
-  bnz   label_0854
+  bnz   .unsupported
   mov   #$04, vrmad1
   ld    vtrbf
-  be    #$04, label_084B
-  be    #$08, label_0850
-  bne   #$02, label_0854
-  mov   #$02, $29
-  br    label_0853
-label_084B:
-  mov   #$04, $29
-  br    label_0853
-label_0850:
-  mov   #$08, $29
-label_0853:
+  be    #$04, .lcd
+  be    #$08, .clock
+  bne   #$02, .unsupported
+  mov   #$02, MapleFuncType
+  br    .return
+.lcd:
+  mov   #$04, MapleFuncType
+  br    .return
+.clock:
+  mov   #$08, MapleFuncType
+.return:
   ret
-label_0854:
-  mov   #$FF, $29
+.unsupported:
+  mov   #$FF, MapleFuncType
   ret
-label_0858:
+;; -----------------------------------------------------------------------------
+;; MapleBlockToFlashAddr ($0858)
+;; Validate the storage location word copied to bank 1 ($75 block lo, $76 block hi,
+;; $77 phase, $78 partition) and turn it into firmware-call parameters
+;; FmBank/FmAddrHi/FmAddrLo = block * 512 + phase * 128.
+;; Errors are OR'ed into MapleStorageErr: bit0 partition != 0, bit1 phase != expected
+;; (MapleExpectedPhase is then set to $FF), bit2 block > 255. Also sets FlashWaitMode = 1.
+;; -----------------------------------------------------------------------------
+MapleBlockToFlashAddr:
   set1  psw, rambk0
   mov   #$78, $00
   ld    @R0
-  bz    label_0864
+  bz    .checkPhase
   clr1  psw, rambk0
-  set1  $27, $00
-label_0864:
+  set1  MapleStorageErr, $00
+.checkPhase:
   clr1  psw, rambk0
-  ld    $25
+  ld    MapleExpectedPhase              ; expected phase
   set1  psw, rambk0
   dec   $00
   sub   @R0
-  bz    label_0876
+  bz    .checkBlockHi
   clr1  psw, rambk0
-  set1  $27, $01
-  mov   #$FE, $25
-label_0876:
+  set1  MapleStorageErr, $01
+  mov   #$FE, MapleExpectedPhase
+.checkBlockHi:
   clr1  psw, rambk0
-  inc   $25
+  inc   MapleExpectedPhase
   set1  psw, rambk0
   dec   $00
-  ld    @R0
-  bz    label_0887
+  ld    @R0                             ; block number high byte
+  bz    .computeAddress
   clr1  psw, rambk0
-  set1  $27, $02
+  set1  MapleStorageErr, $02
   set1  psw, rambk0
-label_0887:
+.computeAddress:
   clr1  psw, rambk0
-  ld    $27
-  bnz   label_08B8
+  ld    MapleStorageErr
+  bnz   .return
   set1  psw, rambk0
   dec   $00
-  ld    @R0
+  ld    @R0                             ; block number low byte
   clr1  psw, cy
   rolc
   rolc
   st    b
   and   #$01
-  st    $7D
+  st    FmBank
   ld    b
   and   #$FC
   mov   #$77, $00
@@ -856,140 +1037,174 @@ label_0887:
   st    c
   and   #$00
   rolc
-  mov   #$80, b
+  mov   #$80, b                         ; (bit 6 of block : block<<2 | phase) * $80
   mul
-  st    $7E
+  st    FmAddrHi
   ld    c
-  st    $7F
-  mov   #$01, $7C
+  st    FmAddrLo
+  mov   #$01, FlashWaitMode             ; FM_WRT completion: DQ7 data polling
   clr1  psw, rambk0
-label_08B8:
+.return:
   ret
-label_08B9:
-  call  label_081D
-  mov   #$00, $25
-  mov   #$1C, vtrbf
-  ld    $20
+;; -----------------------------------------------------------------------------
+;; MapleCmdDeviceInfo ($08B9)
+;; Device Request -> reply $05 "device status", 28 words copied from MapleDeviceInfo:
+;; function codes, function definition words, area, connector direction, product
+;; name, license string, power figures.
+;; -----------------------------------------------------------------------------
+MapleCmdDeviceInfo:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
+  mov   #$1C, vtrbf                     ; length $1C words
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
-  mov   #$05, vtrbf
-  mov   #$95, trl
-  mov   #$0A, trh
+  mov   #$05, vtrbf                     ; command $05
+  mov   #<MapleDeviceInfo, trl
+  mov   #>MapleDeviceInfo, trh
   mov   #$00, acc
   mov   #$03, vlreg
   mov   #$03, b
-  call  label_0F4A
+  call  MapleTxRomWords                 ; first 3 words, then 6 x 4, then 1
   set1  vsel, $00
   set1  mapletxrxctl, $00
-  call  label_0FBF
+  call  MapleWaitTxReady
   mov   #$06, c
-label_08E6:
+.sendChunk:
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$04, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $01
-  call  label_0FBF
-  dbnz  c, label_08E6
+  call  MapleWaitTxReady
+  dbnz  c, .sendChunk
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$00, vlreg
   mov   #$01, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $01
-  call  label_0FBF
+  call  MapleWaitTxReady
   ret
-label_090F:
-  call  label_081D
-  mov   #$00, $25
+;; -----------------------------------------------------------------------------
+;; MapleCmdAllStatus ($090F)
+;; All Status Request -> reply $06, 48 words: the 28 device-info words followed by the
+;; BIOS version string ("Version 1.005,1999/10/26,315-6208-05,...").
+;; -----------------------------------------------------------------------------
+MapleCmdAllStatus:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
   mov   #$30, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$06, vtrbf
-  mov   #$95, trl
-  mov   #$0A, trh
+  mov   #<MapleDeviceInfo, trl
+  mov   #>MapleDeviceInfo, trh
   mov   #$00, acc
   mov   #$03, vlreg
   mov   #$03, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $00
-  call  label_0FBF
+  call  MapleWaitTxReady
   mov   #$0B, c
-label_093C:
+.sendChunk:
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$04, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $01
-  call  label_0FBF
-  dbnz  c, label_093C
+  call  MapleWaitTxReady
+  dbnz  c, .sendChunk
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$01, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $01
-  call  label_0FBF
+  call  MapleWaitTxReady
   ret
-label_0962:
-  call  label_081D
-  mov   #$00, $25
-  call  label_0F32
-  callf label_1017
-  callf label_3C07
+;; -----------------------------------------------------------------------------
+;; MapleCmdReset ($0962)
+;; Device Reset: ack, re-derive our address from the P7 ID pins and clear the screen.
+;; -----------------------------------------------------------------------------
+MapleCmdReset:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
+  call  MapleReplyAck
+  callf MapleInitAddress
+  callf ClearScreen
   ret
-label_0970:
-  call  label_081D
-  mov   #$00, $25
-  call  label_0F32
-  mov   #$55, $22
+;; -----------------------------------------------------------------------------
+;; MapleCmdKill ($0970)
+;; Device Kill: ack and stop answering (MapleAddrState = $55).
+;; -----------------------------------------------------------------------------
+MapleCmdKill:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
+  call  MapleReplyAck
+  mov   #$55, MapleAddrState
   ret
-label_097B:
-  call  label_081D
-  mov   #$00, $25
+;; -----------------------------------------------------------------------------
+;; MapleReplyUnknownCommand ($097B)
+;; Reply $FD (unknown command), no payload.
+;; -----------------------------------------------------------------------------
+MapleReplyUnknownCommand:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
   mov   #$00, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$FD, vtrbf
-  mov   #$FD, $24
+  mov   #$FD, MapleLastCmd
   mov   #$00, vlreg
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_099B:
-  call  label_081D
-  mov   #$00, $25
+;; -----------------------------------------------------------------------------
+;; MapleReplyFunctionUnsupported ($099B)
+;; Reply $FE (function code not supported), no payload.
+;; -----------------------------------------------------------------------------
+MapleReplyFunctionUnsupported:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
   mov   #$00, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$FE, vtrbf
-  mov   #$FE, $24
+  mov   #$FE, MapleLastCmd
   mov   #$00, vlreg
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_09BB:
-  call  label_081D
-  mov   #$00, $25
+;; -----------------------------------------------------------------------------
+;; MapleStorageGetMediaInfo ($09BB)
+;; Get Media Info for storage -> reply $08 with 7 words: the function code and 6 words
+;; of volume layout. If the root block carries the $55 format marker, the layout
+;; (FAT/directory location and size, icon shape, user blocks, ...) is read from root
+;; block offsets $46-$57; otherwise the default layout at MapleStorageMediaInfo is sent.
+;; -----------------------------------------------------------------------------
+MapleStorageGetMediaInfo:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
   mov   #$07, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$08, vtrbf
   mov   #$07, vlreg
@@ -999,20 +1214,20 @@ label_09BB:
   mov   #$FE, trh
   mov   #$00, trl
   mov   #$10, b
-label_09E3:
-  ldf
-  bne   #$55, label_0A38
-  dbnz  b, label_09E3
+.checkFormat:
+  ldf                                   ; root block format marker
+  bne   #$55, .unformatted
+  dbnz  b, .checkFormat
   mov   #$03, vlreg
-  mov   #$59, trl
-  mov   #$0B, trh
+  mov   #<MapleStorageMediaInfo, trl
+  mov   #>MapleStorageMediaInfo, trh
   mov   #$00, acc
   mov   #$02, b
-  call  label_0F4A
+  call  MapleTxRomWords
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
-  mov   #$47, trl
+  mov   #$47, trl                       ; root+$47/$46
   ldf
   st    vtrbf
   dec   trl
@@ -1022,83 +1237,106 @@ label_09E3:
   mov   #$FF, vtrbf
   set1  vsel, $00
   set1  mapletxrxctl, $00
-  call  label_0FBF
+  call  MapleWaitTxReady
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
-  mov   #$FE, trh
+  mov   #$FE, trh                       ; root+$48.. (16 bytes)
   mov   #$48, trl
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$04, b
-  call  label_0F95
+  call  MapleTxFlashWords
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $01
   ret
-label_0A38:
-  mov   #$59, trl
-  mov   #$0B, trh
+.unformatted:
+  mov   #<MapleStorageMediaInfo, trl
+  mov   #>MapleStorageMediaInfo, trh
   mov   #$00, acc
   mov   #$03, vlreg
   mov   #$03, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $00
-  call  label_0FBF
+  call  MapleWaitTxReady
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$03, vlreg
   mov   #$04, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $01
-  call  label_0FBF
+  call  MapleWaitTxReady
   clr1  vsel, $00
   mov   #$00, vrmad1
   ret
-label_0A6A:
-  call  label_081D
-  mov   #$00, $25
+;; -----------------------------------------------------------------------------
+;; MapleLcdGetMediaInfo ($0A6A)
+;; Get Media Info for LCD -> reply $08: function code + MapleLcdMediaInfo
+;; (48x32, 1 bpp, ...).
+;; -----------------------------------------------------------------------------
+MapleLcdGetMediaInfo:
+  call  MapleBeginReply
+  mov   #$00, MapleExpectedPhase
   mov   #$02, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$08, vtrbf
   mov   #$02, vlreg
-  mov   #$75, trl
-  mov   #$0B, trh
+  mov   #<MapleLcdMediaInfo, trl
+  mov   #>MapleLcdMediaInfo, trh
   mov   #$00, acc
   mov   #$02, b
-  call  label_0F4A
+  call  MapleTxRomWords
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
 
+;; -----------------------------------------------------------------------------
+;; MapleDeviceInfo ($0A95)
+;; Maple device info (28 words, kept in Dreamcast word order; MapleTxRomWords reverses
+;; each word for the wire): functions $0E (storage|LCD|clock), the three function definition
+;; words, area code $FF, connector direction 0, then the 30-char product name and the
+;; 60-char license string, then standby/max power.
+;; -----------------------------------------------------------------------------
+MapleDeviceInfo:
   .byte $00, $00, $00, $0E, $7E, $7E, $3F, $40, $00, $05, $10, $00, $00, $0F, $41, $00
   .byte $FF, $00
   .string 92 "Visual Memory                 Produced By or Under License From SEGA ENTERPRISES,LTD.     |"
   .byte $82, $00
+Str_BiosVersion:
   .byte $56, $65, $72, $73, $69, $6F, $6E, $20, $31, $2E, $30, $30, $35, $2C, $31, $39
   .byte $39, $39, $2F, $31, $30, $2F, $32, $36, $2C, $33, $31, $35, $2D, $36, $32, $30
   .byte $38, $2D, $30, $35, $2C, $53, $45, $47, $41, $20, $56, $69, $73, $75, $61, $6C
   .byte $20, $4D, $65, $6D, $6F, $72, $79, $20, $53, $79, $73, $74, $65, $6D, $20, $42
   .byte $49, $4F, $53, $20, $50, $72, $6F, $64, $75, $63, $65, $64, $20, $62, $79, $20
-  .byte $53, $75, $65, $20, $00, $00, $00, $02, $FF, $00, $00, $00, $FF, $00, $FE, $00
+  .byte $53, $75, $65, $20
+MapleStorageMediaInfo:
+  .byte $00, $00, $00, $02, $FF, $00, $00, $00, $FF, $00, $FE, $00
   .byte $01, $00, $FD, $00, $0D, $00, $00, $00, $C8, $00, $1F, $00, $00, $00, $80, $00
+MapleLcdMediaInfo:
   .byte $00, $00, $00, $04, $2F, $1F, $10, $02
 
-label_0B7D:
-  ld    $27
-  bnz   label_0BFB
-  mov   #$00, $25
-  call  label_081D
-  mov   #$82, vtrbf
-  ld    $20
+;; -----------------------------------------------------------------------------
+;; MapleStorageBlockRead ($0B7D)
+;; Block Read on storage -> reply $08 with $82 words: function code, location word,
+;; then the 512-byte block straight out of flash (the flash access icon is lit
+;; while it streams). Any location error (MapleStorageErr) -> MapleReplyFileError.
+;; -----------------------------------------------------------------------------
+MapleStorageBlockRead:
+  ld    MapleStorageErr
+  bnz   .error
+  mov   #$00, MapleExpectedPhase
+  call  MapleBeginReply
+  mov   #$82, vtrbf                     ; length $82 words
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$08, vtrbf
   mov   #$02, vlreg
@@ -1106,67 +1344,72 @@ label_0B7D:
   mov   #$71, $00
   mov   #$02, b
   clr1  psw, rambk0
-  call  label_0F79
+  call  MapleTxRamWords                 ; echo function code + location word from bank 1 $71..
   set1  vsel, $00
   set1  mapletxrxctl, $00
-  call  label_0FBF
+  call  MapleWaitTxReady
   set1  psw, rambk0
-  ld    $7D
+  ld    FmBank
   clr1  psw, rambk0
   st    fpr
   st    FlashBankTemp
   set1  psw, rambk0
-  ld    $7E
+  ld    FmAddrHi
   st    trh
-  ld    $7F
+  ld    FmAddrLo
   st    trl
   clr1  psw, rambk0
   mov   #$03, vlreg
-  mov   #$1F, c
+  mov   #$1F, c                         ; 31 chunks of 16 bytes here, the 32nd below
   mov   #$02, xbnk
-  mov   #$01, xram_0184
-label_0BCB:
+  mov   #$01, xram_0184                 ; flash access icon on
+.sendChunk:
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$04, b
-  call  label_0F95
+  call  MapleTxFlashWords
   ld    trl
-  bnz   label_0BDB
+  bnz   .noCarry
   inc   trh
-label_0BDB:
+.noCarry:
   set1  vsel, $00
   set1  mapletxrxctl, $01
-  call  label_0FBF
-  dbnz  c, label_0BCB
+  call  MapleWaitTxReady
+  dbnz  c, .sendChunk
   clr1  vsel, $00
   mov   #$00, vrmad1
   mov   #$04, b
-  call  label_0F95
+  call  MapleTxFlashWords
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $01
   mov   #$00, xram_0184
   mov   #$00, xbnk
   ret
-label_0BFB:
-  call  label_0EDE
+.error:
+  call  MapleReplyFileError
   ret
-label_0BFE:
+;; -----------------------------------------------------------------------------
+;; MapleClockBlockRead ($0BFE)
+;; Block Read on the clock -> reply $08: function code + date/time word pair
+;; (year, month, day, hour, minute, second, weekday = 0).
+;; -----------------------------------------------------------------------------
+MapleClockBlockRead:
   mov   #$08, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bnz   label_0C58
+  bnz   .badLocation
   ld    vtrbf
-  bnz   label_0C58
+  bnz   .badLocation
   ld    vtrbf
-  bnz   label_0C58
+  bnz   .badLocation
   ld    vtrbf
-  bnz   label_0C58
-  call  label_081D
+  bnz   .badLocation
+  call  MapleBeginReply
   mov   #$03, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$08, vtrbf
   mov   #$03, vlreg
@@ -1175,39 +1418,47 @@ label_0BFE:
   st    vtrbf
   st    vtrbf
   st    vtrbf
-  ld    $1A
+  ld    Day
   st    vtrbf
-  ld    $19
+  ld    Month
   st    vtrbf
-  ld    $17
+  ld    YearHi
   st    vtrbf
-  ld    $18
+  ld    YearLo
   st    vtrbf
   mov   #$00, vtrbf
-  ld    $1D
+  ld    Second
   st    vtrbf
-  ld    $1C
+  ld    Minute
   st    vtrbf
-  ld    $1B
+  ld    Hour
   st    vtrbf
   set1  vsel, $00
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_0C58:
-  call  label_0800
+.badLocation:
+  call  MapleReplyResend
   ret
-label_0C5B:
+;; -----------------------------------------------------------------------------
+;; MapleStorageBlockWrite ($0C5B)
+;; Block Write on storage. A 512-byte block arrives as 4 frames of 128 bytes
+;; (phase 0-3). Each frame is acked immediately, then written to flash with
+;; FM_WRT + verify; errors accumulate in MapleStorageErr:
+;;   bit2 block differs from phase 0's, bit4 wrong frame length, bit3 verify failed.
+;; The Dreamcast finishes with Get Last Error (cmd $0D).
+;; -----------------------------------------------------------------------------
+MapleStorageBlockWrite:
   set1  psw, rambk0
   mov   #$00, vrmad1
   clr1  vrmad2, $00
-  mov   #$70, $00
+  mov   #$70, $00                       ; bank 1 $70.. = length, function code, location
   mov   #$02, b
   ld    vtrbf
   st    @R0
   inc   $00
   mov   #$04, vrmad1
-label_0C70:
+.copyHeader:
   ld    vtrbf
   st    @R0
   inc   $00
@@ -1220,10 +1471,10 @@ label_0C70:
   ld    vtrbf
   st    @R0
   inc   $00
-  dbnz  b, label_0C70
-  mov   #$80, $00
+  dbnz  b, .copyHeader
+  mov   #$80, $00                       ; bank 1 $80-$FF = the 128 data bytes
   mov   #$20, b
-label_0C8D:
+.copyData:
   ld    vtrbf
   st    @R0
   inc   $00
@@ -1236,100 +1487,106 @@ label_0C8D:
   ld    vtrbf
   st    @R0
   inc   $00
-  dbnz  b, label_0C8D
+  dbnz  b, .copyData
   clr1  psw, rambk0
-  call  label_081D
-  call  label_0F32
+  call  MapleBeginReply
+  call  MapleReplyAck
   mov   #$02, xbnk
-  mov   #$01, xram_0184
-  ld    $25
-  bnz   label_0CBF
+  mov   #$01, xram_0184                 ; flash access icon on
+  ld    MapleExpectedPhase              ; phase 0?
+  bnz   .checkBlock
   set1  psw, rambk0
   ld    $75
   clr1  psw, rambk0
-  st    NBytesToSend
-  mov   #$00, $27
-label_0CBF:
+  st    MapleWriteBlock                 ; remember the block number for the next phases
+  mov   #$00, MapleStorageErr
+.checkBlock:
   set1  psw, rambk0
   ld    $75
   clr1  psw, rambk0
-  sub   NBytesToSend
-  bz    label_0CCB
-  set1  $27, $02
-label_0CCB:
+  sub   MapleWriteBlock
+  bz    .checkLength
+  set1  MapleStorageErr, $02
+.checkLength:
   set1  psw, rambk0
   ld    $70
   clr1  psw, rambk0
-  be    #$22, label_0CD6
-  set1  $27, $04
-label_0CD6:
-  call  label_0858
-  ld    $27
-  bnz   label_0D01
+  be    #$22, .write
+  set1  MapleStorageErr, $04
+.write:
+  call  MapleBlockToFlashAddr
+  ld    MapleStorageErr
+  bnz   .return2
   set1  psw, rambk0
   mov   #$80, $00
   mov   #$20, c
   clr1  psw, rambk0
-  call  label_0FC9
+  call  ByteSwapWordsBank1              ; Maple words arrive byte-reversed
   set1  psw, rambk0
-  clr1  ie, $07
-  callf label_E024
+  clr1  ie, $07                         ; no interrupts while the flash is being programmed
+  callf FlashWriteEntry                 ; FM_WRT (unlock + program 128 bytes)
   set1  ie, $07
-  callf label_E01B
+  callf FlashVerifyEntry                ; FM_VRF
   ld    $00
-  bz    label_0CFE
+  bz    .return
   clr1  psw, rambk0
-  set1  $27, $03
+  set1  MapleStorageErr, $03
   set1  psw, rambk0
-label_0CFE:
+.return:
   clr1  psw, rambk0
   ret
-label_0D01:
+.return2:
   ret
-label_0D02:
-  mov   #$00, $28
+;; -----------------------------------------------------------------------------
+;; MapleLcdBlockWrite ($0D02)
+;; Block Write on the LCD: a 48x32 1bpp image (48 words) is byte-swapped in bank 1
+;; ($40-$FF) and copied into both XRAM banks. Errors (wrong length, nonzero
+;; partition/phase/block) are collected in MapleLcdErr and answered with $FA.
+;; -----------------------------------------------------------------------------
+MapleLcdBlockWrite:
+  mov   #$00, MapleLcdErr
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  be    #$32, label_0D15
-  ld    $28
+  be    #$32, .checkPhase
+  ld    MapleLcdErr
   or    #$10
-  st    $28
-label_0D15:
+  st    MapleLcdErr
+.checkPhase:
   mov   #$0B, vrmad1
   ld    vtrbf
-  bz    label_0D22
-  ld    $28
+  bz    .checkPartition
+  ld    MapleLcdErr
   or    #$01
-  st    $28
-label_0D22:
+  st    MapleLcdErr
+.checkPartition:
   mov   #$0A, vrmad1
   ld    vtrbf
-  bz    label_0D2F
-  ld    $28
+  bz    .checkBlock
+  ld    MapleLcdErr
   or    #$02
-  st    $28
-label_0D2F:
+  st    MapleLcdErr
+.checkBlock:
   mov   #$08, vrmad1
   ld    vtrbf
-  bnz   label_0D3A
+  bnz   .badBlock
   ld    vtrbf
-  bz    label_0D40
-label_0D3A:
-  ld    $28
+  bz    .checkErrors
+.badBlock:
+  ld    MapleLcdErr
   or    #$04
-  st    $28
-label_0D40:
-  ld    $28
-  bz    label_0D48
-  call  label_0F08
-  jmp   label_0DBA
-label_0D48:
+  st    MapleLcdErr
+.checkErrors:
+  ld    MapleLcdErr
+  bz    .copyImage
+  call  MapleReplyLcdError
+  jmp   .return
+.copyImage:
   set1  psw, rambk0
   mov   #$40, $00
   mov   #$0C, vrmad1
   mov   #$30, b
-label_0D53:
+.copyLoop:
   ld    vtrbf
   st    @R0
   inc   $00
@@ -1342,25 +1599,25 @@ label_0D53:
   ld    vtrbf
   st    @R0
   inc   $00
-  dbnz  b, label_0D53
+  dbnz  b, .copyLoop
   clr1  psw, rambk0
-  call  label_081D
-  call  label_0F32
+  call  MapleBeginReply
+  call  MapleReplyAck
   set1  psw, rambk0
   mov   #$40, $00
   mov   #$30, c
   clr1  psw, rambk0
-  call  label_0FC9
+  call  ByteSwapWordsBank1
   set1  psw, rambk0
   mov   #$40, $00
   mov   #$00, xbnk
-  mov   #$02, $01
-label_0D87:
+  mov   #$02, $01                       ; $01 counts the two XRAM banks
+.xbank:
   mov   #$08, b
   mov   #$80, $02
-label_0D8D:
+.row:
   mov   #$03, c
-label_0D90:
+.copy12:
   ld    @R0
   st    @R2
   inc   $00
@@ -1377,66 +1634,76 @@ label_0D90:
   st    @R2
   inc   $00
   inc   $02
-  dbnz  c, label_0D90
+  dbnz  c, .copy12
   ld    $02
   add   #$04
   st    $02
-  dbnz  b, label_0D8D
+  dbnz  b, .row
   mov   #$01, xbnk
-  dbnz  $01, label_0D87
-label_0DBA:
+  dbnz  $01, .xbank
+.return:
   clr1  psw, rambk0
   ret
-label_0DBD:
+;; -----------------------------------------------------------------------------
+;; MapleClockBlockWrite ($0DBD)
+;; Block Write on the clock (set date/time): takes year/month/day/hour/minute/second
+;; from the payload, recomputes the leap-year flag and marks the date as set.
+;; -----------------------------------------------------------------------------
+MapleClockBlockWrite:
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bne   #$04, label_0E05
+  bne   #$04, .badLocation
   mov   #$08, vrmad1
   ld    vtrbf
-  bnz   label_0E05
+  bnz   .badLocation
   ld    vtrbf
-  bnz   label_0E05
+  bnz   .badLocation
   ld    vtrbf
-  bnz   label_0E05
+  bnz   .badLocation
   ld    vtrbf
-  bnz   label_0E05
+  bnz   .badLocation
   ld    vtrbf
-  st    $1A
+  st    Day
   ld    vtrbf
-  st    $19
+  st    Month
   ld    vtrbf
-  st    $17
+  st    YearHi
   ld    vtrbf
-  st    $18
+  st    YearLo
   ld    vtrbf
   ld    vtrbf
-  st    $1D
+  st    Second
   ld    vtrbf
-  st    $1C
+  st    Minute
   ld    vtrbf
-  st    $1B
-  call  label_081D
-  call  label_0F32
-  callf label_E02D
+  st    Hour
+  call  MapleBeginReply
+  call  MapleReplyAck
+  callf UpdateLeapYearEntry             ; UpdateLeapYear
   clr1  psw, rambk0
-  mov   #$FF, $31
+  mov   #$FF, DateSet
   ret
-label_0E05:
-  call  label_0800
+.badLocation:
+  call  MapleReplyResend
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_0E08: ; Maple get VMU buttons routine
-  call  label_081D     ; set WRAM to reply mode
-  mov   #$02, vtrbf    ; this block replies to the Dreamcast with the following data
-  ld    $20            ; $02, $20, $21, $08
+;; -----------------------------------------------------------------------------
+;; MapleClockGetCondition ($0E08)
+;; Get Condition on the clock: reply with the raw button state (P3, active low),
+;; MODE and SLEEP masked off so the DC only sees the d-pad and A/B.
+;; -----------------------------------------------------------------------------
+MapleClockGetCondition:
+  call  MapleBeginReply     ; set WRAM to reply mode
+  mov   #$02, vtrbf                     ; length: 2 words
+  ld    MapleMyAddr                     ; sender: us
   st    vtrbf          ; $08, $00, $00, $00
-  ld    $21            ; $00, $00, $00, [raw buttons & $C0]
+  ld    MapleHostAddr                   ; recipient: the host
   st    vtrbf
-  mov   #$08, vtrbf
+  mov   #$08, vtrbf                     ; command $08: data transfer
   mov   #$02, vlreg
-  mov   #$08, vtrbf
+  mov   #$08, vtrbf                     ; function code $00000008 (clock), stored byte-reversed
   mov   #$00, acc
   st    vtrbf
   st    vtrbf
@@ -1444,16 +1711,21 @@ label_0E08: ; Maple get VMU buttons routine
   st    vtrbf
   st    vtrbf
   st    vtrbf
-  ld    p3             ; take P3 as-is (no debounce huh?)
-  or    #$C0           ; remove SLEEP and MODE buttons
+  ld    p3                              ; raw P3, active low
+  or    #$C0                            ; MODE and SLEEP always read as released
   st    vtrbf
-  set1  vsel, $00          ; set WRAM to send mode back
-  set1  mapletxrxctl, $04  ; do god knows what maple things these registers do
+  set1  vsel, $00                       ; hand work RAM back to the Maple hardware
+  set1  mapletxrxctl, $04               ; MAPLETXRXCTL.4 + .0: send the reply
   set1  mapletxrxctl, $00
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_0E3A: ; Maple Buzzer/Beep playback routine
+;; -----------------------------------------------------------------------------
+;; MapleClockSetCondition ($0E3A)
+;; Set Condition on the clock: start the buzzer. Timer 1 runs in PWM mode on P1.7;
+;; the DC supplies a period and a duty value.
+;; -----------------------------------------------------------------------------
+MapleClockSetCondition:
   mov   #$0A, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf         ; Grab duty
@@ -1467,99 +1739,112 @@ label_0E3A: ; Maple Buzzer/Beep playback routine
   add   b             ; T1LC = (FF - pitch number) + duty
   st    t1lc
   mov   #$50, t1cnt   ; T1L on, pulse on
-  call  label_081D    ; Maple-related calls
-  call  label_0F32
+  call  MapleBeginReply    ; Maple-related calls
+  call  MapleReplyAck
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_0E5D:
+;; -----------------------------------------------------------------------------
+;; MapleStorageGetLastError ($0E5D)
+;; Get Last Error (end of block write): turn the flash icon off and ack, or report
+;; MapleStorageErr with $FB.
+;; -----------------------------------------------------------------------------
+MapleStorageGetLastError:
   mov   #$02, xbnk
   mov   #$00, xram_0184
-  ld    $27
-  bnz   label_0E6C
-  call  label_081D
-  call  label_0F32
+  ld    MapleStorageErr
+  bnz   .error
+  call  MapleBeginReply
+  call  MapleReplyAck
   ret
-label_0E6C:
-  call  label_0EDE
+.error:
+  call  MapleReplyFileError
   ret
-label_0E6F:
-  ld    $24
-  bnz   label_0E75
-  br    label_0EDD
-label_0E75:
-  be    #$01, label_0E9B
-  be    #$02, label_0E9F
-  be    #$0A, label_0EA3
-  be    #$0B, label_0EB0
-  be    #$0C, label_0EBD
-  be    #$0D, label_0EC3
-  be    #$09, label_0EC7
-  be    #$0E, label_0ECB ; beep
-  be    #$FD, label_0ECF
-  be    #$FC, label_0ED3
-  be    #$FB, label_0ED7
-  be    #$FA, label_0EDB
-  br    label_0EDD
-label_0E9B:
-  call  label_08B9
-  br    label_0EDD
-label_0E9F:
-  call  label_090F
-  br    label_0EDD
-label_0EA3:
-  ld    $29
-  be    #$04, label_0EAC
-  call  label_09BB
-  br    label_0EDD
-label_0EAC:
-  call  label_0A6A
-  br    label_0EDD
-label_0EB0:
-  ld    $29
-  be    #$08, label_0EB9
-  call  label_0B7D
-  br    label_0EDD
-label_0EB9:
-  call  label_0BFE
-  br    label_0EDD
-label_0EBD:
-  call  label_081D
-  call  label_0F32
-  br    label_0EDD
-label_0EC3:
-  call  label_0E5D
-  br    label_0EDD
-label_0EC7:
-  call  label_0E08
-  br    label_0EDD
-label_0ECB:
-  call  label_0E3A  ; Play maple buzzer
-  br    label_0EDD
-label_0ECF:
-  call  label_097B
-  br    label_0EDD
-label_0ED3:
-  call  label_0800
-  br    label_0EDD
-label_0ED7:
-  call  label_0EDE
-  br    label_0EDD
-label_0EDB:
-  call  label_0F08
-label_0EDD:
+;; -----------------------------------------------------------------------------
+;; MapleResendLastReply ($0E6F)
+;; The DC asked us to resend ($FC): rebuild the reply for MapleLastCmd.
+;; -----------------------------------------------------------------------------
+MapleResendLastReply:
+  ld    MapleLastCmd
+  bnz   .dispatch
+  br    .return
+.dispatch:
+  be    #$01, .deviceInfo
+  be    #$02, .allStatus
+  be    #$0A, .mediaInfo
+  be    #$0B, .blockRead
+  be    #$0C, .ack
+  be    #$0D, .lastError
+  be    #$09, .condition
+  be    #$0E, .buzzer ; beep
+  be    #$FD, .unknown
+  be    #$FC, .resend
+  be    #$FB, .fileError
+  be    #$FA, .lcdError
+  br    .return
+.deviceInfo:
+  call  MapleCmdDeviceInfo
+  br    .return
+.allStatus:
+  call  MapleCmdAllStatus
+  br    .return
+.mediaInfo:
+  ld    MapleFuncType
+  be    #$04, .mediaInfoLcd
+  call  MapleStorageGetMediaInfo
+  br    .return
+.mediaInfoLcd:
+  call  MapleLcdGetMediaInfo
+  br    .return
+.blockRead:
+  ld    MapleFuncType
+  be    #$08, .blockReadClock
+  call  MapleStorageBlockRead
+  br    .return
+.blockReadClock:
+  call  MapleClockBlockRead
+  br    .return
+.ack:
+  call  MapleBeginReply
+  call  MapleReplyAck
+  br    .return
+.lastError:
+  call  MapleStorageGetLastError
+  br    .return
+.condition:
+  call  MapleClockGetCondition
+  br    .return
+.buzzer:
+  call  MapleClockSetCondition  ; Play maple buzzer
+  br    .return
+.unknown:
+  call  MapleReplyUnknownCommand
+  br    .return
+.resend:
+  call  MapleReplyResend
+  br    .return
+.fileError:
+  call  MapleReplyFileError
+  br    .return
+.lcdError:
+  call  MapleReplyLcdError
+.return:
   ret
-label_0EDE:
-  call  label_081D
+;; -----------------------------------------------------------------------------
+;; MapleReplyFileError ($0EDE)
+;; Reply $FB (file error) with one word: MapleStorageErr.
+;; -----------------------------------------------------------------------------
+MapleReplyFileError:
+  call  MapleBeginReply
   mov   #$01, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$FB, vtrbf
-  mov   #$FB, $24
+  mov   #$FB, MapleLastCmd
   mov   #$01, vlreg
-  ld    $27
+  ld    MapleStorageErr
   st    vtrbf
   mov   #$00, acc
   st    vtrbf
@@ -1569,17 +1854,21 @@ label_0EDE:
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_0F08:
-  call  label_081D
+;; -----------------------------------------------------------------------------
+;; MapleReplyLcdError ($0F08)
+;; Reply $FA with one word: MapleLcdErr.
+;; -----------------------------------------------------------------------------
+MapleReplyLcdError:
+  call  MapleBeginReply
   mov   #$01, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$FA, vtrbf
-  mov   #$FA, $24
+  mov   #$FA, MapleLastCmd
   mov   #$01, vlreg
-  ld    $28
+  ld    MapleLcdErr
   st    vtrbf
   mov   #$00, acc
   st    vtrbf
@@ -1589,11 +1878,15 @@ label_0F08:
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_0F32:
+;; -----------------------------------------------------------------------------
+;; MapleReplyAck ($0F32)
+;; Reply $07 (device reply / ack), no payload. Caller must have called MapleBeginReply.
+;; -----------------------------------------------------------------------------
+MapleReplyAck:
   mov   #$00, vtrbf
-  ld    $20
+  ld    MapleMyAddr
   st    vtrbf
-  ld    $21
+  ld    MapleHostAddr
   st    vtrbf
   mov   #$07, vtrbf
   mov   #$00, vlreg
@@ -1601,10 +1894,15 @@ label_0F32:
   set1  mapletxrxctl, $04
   set1  mapletxrxctl, $00
   ret
-label_0F4A:
+;; -----------------------------------------------------------------------------
+;; MapleTxRomWords ($0F4A)
+;; Copy B words from ROM (TRH:TRL + ACC) into work RAM, reversing the byte order of
+;; every word. ACC is advanced past the copied words on return.
+;; -----------------------------------------------------------------------------
+MapleTxRomWords:
   add   #$03
   mov   #$00, fpr
-label_0F4F:
+.loop:
   push  acc
   ldc
   st    vtrbf
@@ -1625,12 +1923,16 @@ label_0F4F:
   st    vtrbf
   pop   acc
   add   #$07
-  dbnz  b, label_0F4F
+  dbnz  b, .loop
   sub   #$03
   ret
-label_0F79:
+;; -----------------------------------------------------------------------------
+;; MapleTxRamWords ($0F79)
+;; Copy B words from bank 1 @R0 into work RAM as-is.
+;; -----------------------------------------------------------------------------
+MapleTxRamWords:
   set1  psw, rambk0
-label_0F7B:
+.loop:
   ld    @R0
   st    vtrbf
   inc   $00
@@ -1643,15 +1945,20 @@ label_0F7B:
   ld    @R0
   st    vtrbf
   inc   $00
-  dbnz  b, label_0F7B
+  dbnz  b, .loop
   clr1  psw, rambk0
   ret
-label_0F95:
+;; -----------------------------------------------------------------------------
+;; MapleTxFlashWords ($0F95)
+;; Copy B words from flash (FPR, TRH:TRL) into work RAM, byte-reversed, lighting
+;; the flash access icon. TRL is advanced past the copied words.
+;; -----------------------------------------------------------------------------
+MapleTxFlashWords:
   mov   #$02, xbnk
   mov   #$01, xram_0184
   ld    trl
   add   #$03
-label_0F9F:
+.loop:
   st    trl
   ldf
   st    vtrbf
@@ -1666,18 +1973,27 @@ label_0F9F:
   st    vtrbf
   ld    trl
   add   #$07
-  dbnz  b, label_0F9F
+  dbnz  b, .loop
   sub   #$03
   st    trl
   ret
-label_0FBF:
+;; -----------------------------------------------------------------------------
+;; MapleWaitTxReady ($0FBF)
+;; Spin until MAPLESTA.0 says the transmit chunk has been taken by the hardware.
+;; -----------------------------------------------------------------------------
+MapleWaitTxReady:
   push  acc
-label_0FC1:
+.wait:
   ld    maplesta
-  bn    acc, $00, label_0FC1
+  bn    acc, $00, .wait
   pop   acc
   ret
-label_0FC9:
+;; -----------------------------------------------------------------------------
+;; ByteSwapWordsBank1 ($0FC9)
+;; Reverse the byte order of C 32-bit words in bank 1 starting at R0 (rounded down
+;; to a multiple of 4).
+;; -----------------------------------------------------------------------------
+ByteSwapWordsBank1:
   push  acc
   push  b
   push  c
@@ -1687,7 +2003,7 @@ label_0FC9:
   st    $00
   add   #$03
   st    $01
-label_0FDB:
+.loop:
   ld    @R1
   st    b
   ld    @R0
@@ -1708,13 +2024,18 @@ label_0FDB:
   ld    $00
   add   #$03
   st    $00
-  dbnz  c, label_0FDB
+  dbnz  c, .loop
   clr1  psw, rambk0
   pop   c
   pop   b
   pop   acc
   ret
-label_1007:
+;; -----------------------------------------------------------------------------
+;; MapleHwReset ($1007)
+;; Pulse MAPLERST, then VSEL = $13 (work RAM to Maple, auto-increment) and enable
+;; frame reception (MAPLETXRXCTL.2).
+;; -----------------------------------------------------------------------------
+MapleHwReset:
   mov   #$80, maplerst
   nop
   nop
@@ -1724,24 +2045,40 @@ label_1007:
   mov   #$13, vsel
   set1  mapletxrxctl, $02
   ret
-label_1017:
+;; -----------------------------------------------------------------------------
+;; MapleInitAddress ($1017)
+;; Forget our Maple address and compute the expansion-slot bit from P7.2-3 (which
+;; slot of the controller we are in) via MapleSlotBits; MapleIdPins keeps the raw
+;; pin state so MapleMode can notice a move to another slot.
+;; -----------------------------------------------------------------------------
+MapleInitAddress:
   mov   #$00, acc
-  st    $20
-  st    $22
+  st    MapleMyAddr
+  st    MapleAddrState
   ld    p7
   and   #$0C
-  st    $23
+  st    MapleIdPins
   ror
   ror
-  mov   #$30, trl
-  mov   #$10, trh
+  mov   #<MapleSlotBits, trl
+  mov   #>MapleSlotBits, trh
   ldc
-  st    $20
+  st    MapleMyAddr
   ret
 
+MapleSlotBits:
   .byte $01, $02, $04, $08
 
-label_1034:
+;; -----------------------------------------------------------------------------
+;; ClockMode ($1034)
+;; BiosMode 2, A pressed. Shows HH:MM in big digits with the selected animal
+;; animation (ClockAnimationStep) on the right. Keys:
+;;   A alone / Right -> ClockShowDate for a few seconds
+;;   A + Left        -> ClockSettingsMenu
+;;   MODE / plug in  -> back to MainMenu (via WaitKeyEvent's $FD / $FF)
+;;   SLEEP           -> SleepUntilWake, then redraw
+;; -----------------------------------------------------------------------------
+ClockMode:
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
@@ -1750,697 +2087,784 @@ label_1034:
   mov   #$04, xram_0183
   mov   #$00, xbnk
   pop   ocr
-  mov   #$00, $6E
-label_104D:
-  call  label_10CA
-  mov   #$01, $33
-  mov   #$00, SerialTimeout
-  mov   #$80, $35
-label_1058:
-  callf label_3696
-  be    #$FF, label_10C4
-  be    #$FE, label_1088
-  be    #$FD, label_10C4
-  be    #$08, label_1099
-  ld    $70
-  be    #$14, label_108D
-  be    #$10, label_1099
-  ld    $1D
+  mov   #$00, BatteryCheck
+.redraw:
+  call  ClockDrawTime
+  mov   #$01, IdleTicks
+  mov   #$00, HalfSecTicks
+  mov   #$80, SleepCtl
+.loop:
+  callf WaitKeyEvent
+  be    #$FF, .exit
+  be    #$FE, .sleep
+  be    #$FD, .exit
+  be    #$08, .showDate
+  ld    Buttons_Current
+  be    #$14, .settings                 ; A + Left held together?
+  be    #$10, .showDate
+  ld    Second                          ; seconds changed since last pass?
   xor   b
-  bz    label_1077
-  call  label_1805
-label_1077:
-  ld    $1D
+  bz    .noTick
+  call  ClockAnimationStep              ; advance the clock animation one frame
+.noTick:
+  ld    Second                          ; new minute -> redraw HH:MM
   st    b
-  bnz   label_1058
+  bnz   .loop
   push  ocr
   mov   #$81, ocr
-  call  label_1102
+  call  ClockUpdateTime
   pop   ocr
-  br    label_1058
-label_1088:
-  callf label_0421
-  br    label_104D
-label_108D:
-  call  label_1167
-  bnz   label_10C4
-  mov   #$00, $35
-  mov   #$01, $33
-  jmp   label_104D
-label_1099:
-  call  label_112E
-  mov   #$00, SerialTimeout
-  mov   #$01, $33
-  mov   #$80, $35
-label_10A4:
-  callf label_3696
-  be    #$FF, label_10C4
-  be    #$FE, label_1088
-  be    #$FD, label_10C4
-  be    #$04, label_104D
-  ld    $70
+  br    .loop
+.sleep:
+  callf SleepUntilWake
+  br    .redraw
+.settings:
+  call  ClockSettingsMenu
+  bnz   .exit
+  mov   #$00, SleepCtl
+  mov   #$01, IdleTicks
+  jmp   .redraw
+.showDate:
+  call  ClockShowDate
+  mov   #$00, HalfSecTicks
+  mov   #$01, IdleTicks
+  mov   #$80, SleepCtl                  ; SleepCtl $80: SLEEP returns $FE to this loop
+.dateLoop:
+  callf WaitKeyEvent
+  be    #$FF, .exit
+  be    #$FE, .sleep
+  be    #$FD, .exit
+  be    #$04, .redraw
+  ld    Buttons_Current
   and   #$38
-  be    #$20, label_104D
-  ld    $33
-  be    #$08, label_10A4
-  bp    psw, cy, label_10A4
-  br    label_104D
-label_10C4:
-  mov   #$00, $35
-  jmpf  label_02EF
-label_10CA:
+  be    #$20, .redraw                   ; B (without A/Right) -> back to the time
+  ld    IdleTicks                       ; show the date for 8 half-second ticks
+  be    #$08, .dateLoop
+  bp    psw, cy, .dateLoop
+  br    .redraw
+.exit:
+  mov   #$00, SleepCtl
+  jmpf  MainMenu
+;; -----------------------------------------------------------------------------
+;; ClockDrawTime ($10CA)
+;; Clear the screen and draw HH:MM with the big 8x8 digits (row 0). Also resets the
+;; animation frame counter in ClockAnim (keeps the animal selection bits).
+;; -----------------------------------------------------------------------------
+ClockDrawTime:
   push  acc
   push  b
-  push  $60
-  push  $61
+  push  CursorX
+  push  CursorY
   push  psw
   clr1  psw, rambk0
   clr1  p3int, $00
-  ld    $32
+  ld    ClockAnim
   and   #$C0
-  st    $32
-  callf label_3C07
-  mov   #$00, $61
-  call  label_164E
-  st    $14
-  call  label_1671
-  st    $15
-  mov   #$03, $60
-  mov   #$0A, acc
-  callf label_38F0
+  st    ClockAnim
+  callf ClearScreen
+  mov   #$00, CursorY
+  call  DrawHour
+  st    BcdHour
+  call  DrawMinute                      ; ACC = BCD minute
+  st    BcdMinute
+  mov   #$03, CursorX
+  mov   #$0A, acc                       ; glyph $0A = ':'
+  callf DrawGlyph8x8
   set1  p3int, $00
   pop   psw
-  pop   $61
-  pop   $60
+  pop   CursorY
+  pop   CursorX
   pop   b
   pop   acc
   ret
-label_1102:
+;; -----------------------------------------------------------------------------
+;; ClockUpdateTime ($1102)
+;; Called when Second == 0: redraw the minutes, and the hours too on the hour.
+;; -----------------------------------------------------------------------------
+ClockUpdateTime:
   push  acc
   push  b
   push  c
-  push  $60
-  push  $61
+  push  CursorX
+  push  CursorY
   clr1  p3int, $00
-  mov   #$00, $61
-  ld    $1D
-  bnz   label_1121
-  call  label_1671
-  st    $15
-  ld    $1C
-  bnz   label_1121
-  call  label_164E
-  st    $14
-label_1121:
+  mov   #$00, CursorY
+  ld    Second
+  bnz   .return
+  call  DrawMinute
+  st    BcdMinute
+  ld    Minute
+  bnz   .return
+  call  DrawHour
+  st    BcdHour
+.return:
   set1  p3int, $00
-  pop   $61
-  pop   $60
+  pop   CursorY
+  pop   CursorX
   pop   c
   pop   b
   pop   acc
   ret
-label_112E:
+;; -----------------------------------------------------------------------------
+;; ClockShowDate ($112E)
+;; Draw the date below the time: year on row 2, month name + day on row 0 (the
+;; row-0 time is overwritten), and refresh the BCD copies BcdYearHi..BcdDay.
+;; -----------------------------------------------------------------------------
+ClockShowDate:
   push  acc
   push  $00
-  push  $60
-  push  $61
+  push  CursorX
+  push  CursorY
   clr1  p3int, $00
-  callf label_3C07
-  mov   #$02, $61
-  call  label_15AB
+  callf ClearScreen
+  mov   #$02, CursorY
+  call  DrawYear
   clr1  p3int, $00
-  mov   #$52, $00
+  mov   #MathHi, $00
   ld    @R0
-  st    $10
+  st    BcdYearHi
   inc   $00
   ld    @R0
-  st    $11
-  mov   #$00, $61
-  call  label_15BF
+  st    BcdYearLo
+  mov   #$00, CursorY
+  call  DrawMonthName
   clr1  p3int, $00
-  st    $12
-  call  label_162B
+  st    BcdMonth
+  call  DrawDay
   clr1  p3int, $00
-  st    $13
+  st    BcdDay
   set1  p3int, $00
-  pop   $61
-  pop   $60
+  pop   CursorY
+  pop   CursorX
   pop   $00
   pop   acc
   ret
-label_1167:
+;; -----------------------------------------------------------------------------
+;; ClockSettingsMenu ($1167)
+;; "Set clock" with a Yes/No choice (Left/Right, kept in B, No preselected).
+;; A on Yes runs SetClockProcedure; A on No moves on to the animal picker
+;; (AnimalMenu). B returns to the clock.
+;; Out: ACC = 0 back to ClockMode, $FF if the controller was plugged in.
+;; -----------------------------------------------------------------------------
+ClockSettingsMenu:
   clr1  p3int, $00
-  callf label_3C07
-  call  label_1240
+  callf ClearScreen
+  call  DrawSetClockTitle
   mov   #$00, acc
-  callf label_1F47
-  mov   #$40, $35
+  callf DrawYesNoChoice
+  mov   #$40, SleepCtl
   set1  p3int, $00
   st    b
-  callf label_3675
-label_117E:
-  callf label_3696
-  be    #$10, label_1192
-  be    #$20, label_11F2
-  be    #$04, label_119D
-  be    #$08, label_119D
-  be    #$FF, label_11FB
-  br    label_117E
-label_1192:
+  callf WaitAllButtonsReleased
+.loop:
+  callf WaitKeyEvent
+  be    #$10, .select
+  be    #$20, AnimalMenu_accept
+  be    #$04, .toggle
+  be    #$08, .toggle
+  be    #$FF, AnimalMenu_pluggedIn
+  br    .loop
+.select:
   ld    b
-  bz    label_11AB
-  call  label_129D
-  be    #$FF, label_11FB
-  br    label_11AB
-label_119D:
+  bz    AnimalMenu
+  call  SetClockProcedure
+  be    #$FF, AnimalMenu_pluggedIn
+  br    AnimalMenu
+.toggle:
   ld    b
   xor   #$FF
   st    b
-  callf label_1F47
-  callf label_3662
-  br    label_117E
-label_11AB:
-  callf label_3C07
-  call  label_11FF
-  mov   #$40, $35
-  callf label_3675
-label_11B6:
-  callf label_3696
-  be    #$10, label_11F2
-  be    #$20, label_1167
-  be    #$01, label_11CA
-  be    #$02, label_11E1
-  be    #$FF, label_11FB
-  br    label_11B6
-label_11CA:
-  ld    $32
+  callf DrawYesNoChoice
+  callf WaitDpadReleased
+  br    .loop
+;; -----------------------------------------------------------------------------
+;; AnimalMenu ($11AB)
+;; Pick the clock animation: Up/Down cycles ClockAnim bits 7-6 through
+;; Dog (0), Fish ($40), Bird ($80). A accepts, B goes back to ClockSettingsMenu.
+;; -----------------------------------------------------------------------------
+AnimalMenu:
+  callf ClearScreen
+  call  DrawAnimalMenu
+  mov   #$40, SleepCtl
+  callf WaitAllButtonsReleased
+.loop:
+  callf WaitKeyEvent
+  be    #$10, AnimalMenu_accept
+  be    #$20, ClockSettingsMenu
+  be    #$01, .next
+  be    #$02, .prev
+  be    #$FF, AnimalMenu_pluggedIn
+  br    .loop
+.next:
+  ld    ClockAnim
   and   #$C0
-  be    #$40, label_11D9
-  bp    psw, cy, label_11D9
-  mov   #$00, $32
-  br    label_11DD
-label_11D9:
+  be    #$40, .add
+  bp    psw, cy, .add
+  mov   #$00, ClockAnim
+  br    .redraw
+.add:
   add   #$40
-  st    $32
-label_11DD:
-  call  label_1213
-  br    label_11B6
-label_11E1:
-  ld    $32
+  st    ClockAnim
+.redraw:
+  call  DrawAnimalName
+  br    .loop
+.prev:
+  ld    ClockAnim
   and   #$C0
-  bnz   label_11EC
-  mov   #$80, $32
-  br    label_11DD
-label_11EC:
+  bnz   .sub
+  mov   #$80, ClockAnim
+  br    .redraw
+.sub:
   sub   #$40
-  st    $32
-  br    label_11DD
-label_11F2:
+  st    ClockAnim
+  br    .redraw
+AnimalMenu_accept:
   set1  p3int, $00
   mov   #$00, acc
-  mov   #$02, $30
+  mov   #$02, BiosMode
   ret
-label_11FB:
+AnimalMenu_pluggedIn:
   mov   #$FF, acc
   ret
-label_11FF:
+;; -----------------------------------------------------------------------------
+;; DrawAnimalMenu ($11FF)
+;; "Animated display" title, then falls into DrawAnimalName.
+;; -----------------------------------------------------------------------------
+DrawAnimalMenu:
   clr1  p3int, $00
-  mov   #$1C, trl
-  mov   #$19, trh     ; Load string "Animated display"
-  mov   #$00, $67
-  mov   #$00, $60
-  mov   #$00, $61
+  mov   #<Str_AnimatedDisplay, trl
+  mov   #>Str_AnimatedDisplay, trh
+  mov   #$00, TextInvert
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
-label_1213:
+;; -----------------------------------------------------------------------------
+;; DrawAnimalName ($1213)
+;; Name of the animal selected in ClockAnim bits 7-6 on row 3.
+;; -----------------------------------------------------------------------------
+DrawAnimalName:
   clr1  p3int, $00
-  ld    $32
+  ld    ClockAnim
   and   #$C0
-  bz    label_1226
-  be    #$40, label_122E
-  mov   #$2F, trl
-  mov   #$19, trh     ; Load string "Bird"
-  br    label_1234
-label_1226:
-  mov   #$38, trl
-  mov   #$19, trh     ; Load string "Dog"
-  br    label_1234
-label_122E:
-  mov   #$41, trl
-  mov   #$19, trh     ; Load string "Fish"
-label_1234:
-  mov   #$00, $60
-  mov   #$03, $61
+  bz    .dog
+  be    #$40, .fish
+  mov   #<Str_Bird, trl
+  mov   #>Str_Bird, trh
+  br    .draw
+.dog:
+  mov   #<Str_Dog, trl
+  mov   #>Str_Dog, trh
+  br    .draw
+.fish:
+  mov   #<Str_Fish, trl
+  mov   #>Str_Fish, trh
+.draw:
+  mov   #$00, CursorX
+  mov   #$03, CursorY
   callf DrawString
   set1  p3int, $00
   ret
-label_1240:
-  mov   #$4A, trl
-  mov   #$19, trh     ; Load string "Set clock"(?)
-  mov   #$00, $67
-  mov   #$00, $60
-  mov   #$00, $61
+;; -----------------------------------------------------------------------------
+;; DrawSetClockTitle ($1240)
+;; "Set clock" on rows 0-1.
+;; -----------------------------------------------------------------------------
+DrawSetClockTitle:
+  mov   #<Str_SetClock, trl
+  mov   #>Str_SetClock, trh
+  mov   #$00, TextInvert
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
   ret
-label_1253:
-  mov   #$20, $10
-  mov   #$00, $11
-  mov   #$10, $00
-  callf label_3470
-  ld    $52
-  st    $17
-  ld    $53
-  st    $18
-  mov   #$01, $12
-  ld    $12
-  callf label_344B
-  st    $19
-  mov   #$01, $13
-  ld    $13
-  callf label_344B
-  st    $1A
-  mov   #$00, $14
-  ld    $14
-  callf label_344B
-  st    $1B
-  mov   #$00, $15
-  ld    $15
-  callf label_344B
-  st    $1C
-  mov   #$00, $16
-  ld    $16
-  callf label_344B
-  st    $1D
-  mov   #$00, $1E
+;; -----------------------------------------------------------------------------
+;; InitDefaultDateTime ($1253)
+;; Load 2000-01-01 00:00:00 into the BCD copy (BcdYearHi..BcdSecond) and the binary
+;; date/time (YearHi..Second), and clear HalfSecond.
+;; -----------------------------------------------------------------------------
+InitDefaultDateTime:
+  mov   #$20, BcdYearHi
+  mov   #$00, BcdYearLo
+  mov   #BcdYearHi, $00                 ; R0 -> BcdYearHi: Bcd16ToBin -> MathHi:MathLo
+  callf Bcd16ToBin
+  ld    MathHi
+  st    YearHi
+  ld    MathLo
+  st    YearLo
+  mov   #$01, BcdMonth
+  ld    BcdMonth
+  callf BcdToBin
+  st    Month
+  mov   #$01, BcdDay
+  ld    BcdDay
+  callf BcdToBin
+  st    Day
+  mov   #$00, BcdHour
+  ld    BcdHour
+  callf BcdToBin
+  st    Hour
+  mov   #$00, BcdMinute
+  ld    BcdMinute
+  callf BcdToBin
+  st    Minute
+  mov   #$00, BcdSecond
+  ld    BcdSecond
+  callf BcdToBin
+  st    Second
+  mov   #$00, HalfSecond
   ret
-label_129D:
+;; -----------------------------------------------------------------------------
+;; SetClockProcedure ($129D)
+;; The set-the-clock wizard: year, month, day, hour, minute, then "OK ?". Each step
+;; returns $20 (B pressed) to step back to the previous field. Gives up with
+;; ACC = $FF as soon as the VMU is plugged into a controller; ACC = 0 when done.
+;; Seconds are reset to 0 when the user confirms.
+;; -----------------------------------------------------------------------------
+SetClockProcedure:
   push  psw
   clr1  psw, rambk0
-  ld    $1B
-  callf label_34FA
-  st    $14
-  ld    $1C
-  callf label_34FA
-  st    $15
-  mov   #$00, $1D
+  ld    Hour
+  callf BinToBcd
+  st    BcdHour
+  ld    Minute
+  callf BinToBcd
+  st    BcdMinute
+  mov   #$00, Second                    ; seconds restart from zero
   ld    p7
   and   #$01
-  bnz   label_1329
-  mov   #$40, $35
-label_12BB:
-  callf label_3C07
+  bnz   .pluggedIn
+  mov   #$40, SleepCtl                  ; SleepCtl $40: ignore SLEEP while editing
+.year:
+  callf ClearScreen
   ld    p7
   and   #$01
-  bnz   label_1329
-  mov   #$00, $67
-  call  label_1681
-  call  label_132E
-  callf label_E02D
-label_12CE:
+  bnz   .pluggedIn
+  mov   #$00, TextInvert
+  call  SetClockShowYear
+  call  SetClockEditYear
+  callf UpdateLeapYearEntry             ; UpdateLeapYear
+.month:
   ld    p7
   and   #$01
-  bnz   label_1329
-  call  label_16AF
-  call  label_1395
-  be    #$20, label_12BB
-label_12DB:
+  bnz   .pluggedIn
+  call  SetClockShowMonth
+  call  SetClockEditMonth
+  be    #$20, .year
+.day:
   ld    p7
   and   #$01
-  bnz   label_1329
-  call  label_16F2
-  call  label_140D
-  be    #$20, label_12CE
-label_12E8:
+  bnz   .pluggedIn
+  call  SetClockShowDay
+  call  SetClockEditDay
+  be    #$20, .month
+.hour:
   ld    p7
   and   #$01
-  bnz   label_1329
-  ld    $1B
-  callf label_34FA
-  st    $14
-  ld    $1C
-  callf label_34FA
-  st    $15
-  call  label_173B
-  call  label_14F4
-  be    #$20, label_12DB
-label_1303:
+  bnz   .pluggedIn
+  ld    Hour
+  callf BinToBcd
+  st    BcdHour
+  ld    Minute
+  callf BinToBcd
+  st    BcdMinute
+  call  SetClockShowHour
+  call  SetClockEditHour
+  be    #$20, .day
+.minute:
   ld    p7
   and   #$01
-  bnz   label_1329
-  call  label_179E
-  call  label_1532
-  be    #$20, label_12E8
+  bnz   .pluggedIn
+  call  SetClockShowMinute
+  call  SetClockEditMinute
+  be    #$20, .hour
   ld    p7
   and   #$01
-  bnz   label_1329
-  call  label_17DC
-  call  label_1570
-  be    #$20, label_1303
-  mov   #$00, $1D
+  bnz   .pluggedIn
+  call  SetClockShowConfirm
+  call  SetClockConfirm
+  be    #$20, .minute
+  mov   #$00, Second
   mov   #$00, acc
-label_1323:
-  mov   #$00, $35
+.return:
+  mov   #$00, SleepCtl
   pop   psw
   ret
-label_1329:
+.pluggedIn:
   mov   #$FF, acc
-  br    label_1323
-label_132E:
-  callf label_3675
-  mov   #$00, SerialTimeout
-label_1334:
-  callf label_3718
-  mov   #$00, $1D
-  be    #$10, label_1394
-  be    #$01, label_1348
-  be    #$02, label_136F
-  be    #$FF, label_1394
-  br    label_1334
-label_1348:
-  ld    $18
+  br    .return
+;; -----------------------------------------------------------------------------
+;; SetClockEditYear ($132E)
+;; Up/Down change the year (wraps 0 <-> 9999), A or B leave the field.
+;; Out: ACC = key that ended the edit.
+;; -----------------------------------------------------------------------------
+SetClockEditYear:
+  callf WaitAllButtonsReleased
+  mov   #$00, HalfSecTicks
+.loop:
+  callf WaitKeyEventRepeat
+  mov   #$00, Second
+  be    #$10, .return
+  be    #$01, .inc
+  be    #$02, .dec
+  be    #$FF, .return
+  br    .loop
+.inc:
+  ld    YearLo
   clr1  psw, cy
   add   #$01
-  st    $18
+  st    YearLo
   mov   #$00, acc
-  addc  $17
-  st    $17
-  ld    $17
-  be    #$26, label_138D
-  bp    psw, cy, label_138D
-  ld    $18
-  be    #$0F, label_138D
-  bp    psw, cy, label_138D
-  mov   #$00, $17
-  mov   #$00, $18
-  br    label_138D
-label_136F:
-  ld    $18
+  addc  YearHi
+  st    YearHi
+  ld    YearHi
+  be    #$26, .redraw                   ; year > $270F (9999) -> wrap to 0
+  bp    psw, cy, .redraw
+  ld    YearLo
+  be    #$0F, .redraw
+  bp    psw, cy, .redraw
+  mov   #$00, YearHi
+  mov   #$00, YearLo
+  br    .redraw
+.dec:
+  ld    YearLo
   clr1  psw, cy
   sub   #$01
-  st    $18
-  ld    $17
+  st    YearLo
+  ld    YearHi
   subc  #$00
-  st    $17
-  ld    $17
-  bne   #$FF, label_138D
-  ld    $18
-  bne   #$FF, label_138D
-  mov   #$27, $17
-  mov   #$0F, $18
-label_138D:
-  mov   #$01, $61
-  call  label_15AB
-  br    label_1334
-label_1394:
+  st    YearHi
+  ld    YearHi
+  bne   #$FF, .redraw
+  ld    YearLo
+  bne   #$FF, .redraw
+  mov   #$27, YearHi
+  mov   #$0F, YearLo
+.redraw:
+  mov   #$01, CursorY
+  call  DrawYear
+  br    .loop
+.return:
   ret
-label_1395:
-  callf label_3675
-  mov   #$00, SerialTimeout
-label_139B:
-  callf label_3718
-  mov   #$00, $1D
-  be    #$10, label_13DB
-  be    #$20, label_13DB
-  be    #$01, label_13B2
-  be    #$02, label_13C1
-  be    #$FF, label_13DB
-  br    label_139B
-label_13B2:
-  inc   $19
-  ld    $19
-  be    #$0C, label_13CA
-  bp    psw, cy, label_13CA
-  mov   #$01, $19
-  br    label_13CA
-label_13C1:
-  dec   $19
-  ld    $19
-  bnz   label_13CA
-  mov   #$0C, $19
-label_13CA:
-  call  label_15BF
-  ld    $19
-  be    #$02, label_13F3
-  ld    $1A
-  be    #$1E, label_13DC
-  bn    psw, cy, label_13DC
-  br    label_139B
-label_13DB:
+;; -----------------------------------------------------------------------------
+;; SetClockEditMonth ($1395)
+;; Up/Down change the month (1-12, wrapping) and clamp the day to the new month's
+;; length (February honours LeapYear).
+;; -----------------------------------------------------------------------------
+SetClockEditMonth:
+  callf WaitAllButtonsReleased
+  mov   #$00, HalfSecTicks
+.loop:
+  callf WaitKeyEventRepeat
+  mov   #$00, Second
+  be    #$10, .return
+  be    #$20, .return
+  be    #$01, .inc
+  be    #$02, .dec
+  be    #$FF, .return
+  br    .loop
+.inc:
+  inc   Month
+  ld    Month
+  be    #$0C, .redraw
+  bp    psw, cy, .redraw
+  mov   #$01, Month
+  br    .redraw
+.dec:
+  dec   Month
+  ld    Month
+  bnz   .redraw
+  mov   #$0C, Month
+.redraw:
+  call  DrawMonthName
+  ld    Month
+  be    #$02, .clampFeb
+  ld    Day
+  be    #$1E, .clamp30
+  bn    psw, cy, .clamp30
+  br    .loop
+.return:
   ret
-label_13DC:
-  ld    $19
-  be    #$04, label_13EC
-  be    #$06, label_13EC
-  be    #$09, label_13EC
-  be    #$0B, label_13EC
-  br    label_139B
-label_13EC:
-  mov   #$1E, $1A
-  call  label_162B
-  br    label_139B
-label_13F3:
-  ld    $1A
-  be    #$1D, label_13FD
-  bn    psw, cy, label_13FD
-  br    label_139B
-label_13FD:
-  ld    $1F
-  bz    label_1406
-  mov   #$1D, $1A
-  br    label_1409
-label_1406:
-  mov   #$1C, $1A
-label_1409:
-  call  label_162B
-  br    label_139B
-label_140D:
-  callf label_3675
-  mov   #$00, SerialTimeout
-label_1413:
-  callf label_3718
-  mov   #$00, $1D
-  be    #$10, label_142A
-  be    #$20, label_142A
-  be    #$01, label_146C
-  be    #$FF, label_142A
-  bne   #$02, label_1413
-  jmp   label_14B7
-label_142A:
+.clamp30:
+  ld    Month
+  be    #$04, .setDay30
+  be    #$06, .setDay30
+  be    #$09, .setDay30
+  be    #$0B, .setDay30
+  br    .loop
+.setDay30:
+  mov   #$1E, Day
+  call  DrawDay
+  br    .loop
+.clampFeb:
+  ld    Day
+  be    #$1D, .feb
+  bn    psw, cy, .feb
+  br    .loop
+.feb:
+  ld    LeapYear
+  bz    .feb28
+  mov   #$1D, Day
+  br    .redrawDay
+.feb28:
+  mov   #$1C, Day
+.redrawDay:
+  call  DrawDay
+  br    .loop
+;; -----------------------------------------------------------------------------
+;; SetClockEditDay ($140D)
+;; Up/Down change the day within the current month's length. On exit the day is
+;; clamped again in case the month/leap year changed.
+;; -----------------------------------------------------------------------------
+SetClockEditDay:
+  callf WaitAllButtonsReleased
+  mov   #$00, HalfSecTicks
+.loop:
+  callf WaitKeyEventRepeat
+  mov   #$00, Second
+  be    #$10, .clampAndReturn
+  be    #$20, .clampAndReturn
+  be    #$01, .inc
+  be    #$FF, .clampAndReturn
+  bne   #$02, .loop
+  jmp   .dec
+.clampAndReturn:
   push  acc
-  ld    $19
-  be    #$02, label_1440
-  be    #$04, label_145E
-  be    #$06, label_145E
-  be    #$09, label_145E
-  be    #$0B, label_145E
+  ld    Month
+  be    #$02, .clampFeb
+  be    #$04, .clamp30
+  be    #$06, .clamp30
+  be    #$09, .clamp30
+  be    #$0B, .clamp30
   pop   acc
   ret
-label_1440:
-  ld    $1F
-  bnz   label_1451
-  ld    $1A
-  be    #$1C, label_1469
-  bp    psw, cy, label_1469
-  mov   #$1C, $1A
-  br    label_1469
-label_1451:
-  ld    $1A
-  be    #$1D, label_1469
-  bp    psw, cy, label_1469
-  mov   #$1D, $1A
-  br    label_1469
-label_145E:
-  ld    $1A
-  be    #$1E, label_1469
-  bp    psw, cy, label_1469
-  mov   #$1E, $1A
-label_1469:
+.clampFeb:
+  ld    LeapYear
+  bnz   .clampFebLeap
+  ld    Day
+  be    #$1C, .return
+  bp    psw, cy, .return
+  mov   #$1C, Day
+  br    .return
+.clampFebLeap:
+  ld    Day
+  be    #$1D, .return
+  bp    psw, cy, .return
+  mov   #$1D, Day
+  br    .return
+.clamp30:
+  ld    Day
+  be    #$1E, .return
+  bp    psw, cy, .return
+  mov   #$1E, Day
+.return:
   pop   acc
   ret
-label_146C:
-  inc   $1A
-  ld    $19
-  be    #$02, label_1499
-  be    #$04, label_148C
-  be    #$06, label_148C
-  be    #$09, label_148C
-  be    #$0B, label_148C
-  ld    $1A
-  be    #$1F, label_14F0
-  bp    psw, cy, label_14F0
-  mov   #$01, $1A
-  br    label_14F0
-label_148C:
-  ld    $1A
-  be    #$1E, label_14F0
-  bp    psw, cy, label_14F0
-  mov   #$01, $1A
-  br    label_14F0
-label_1499:
-  ld    $1F
-  bnz   label_14AA
-  ld    $1A
-  be    #$1C, label_14F0
-  bp    psw, cy, label_14F0
-  mov   #$01, $1A
-  br    label_14F0
-label_14AA:
-  ld    $1A
-  be    #$1D, label_14F0
-  bp    psw, cy, label_14F0
-  mov   #$01, $1A
-  br    label_14F0
-label_14B7:
-  dec   $1A
-  ld    $19
-  be    #$02, label_14DC
-  be    #$04, label_14D3
-  be    #$06, label_14D3
-  be    #$09, label_14D3
-  be    #$0B, label_14D3
-  ld    $1A
-  bnz   label_14F0
-  mov   #$1F, $1A
-  br    label_14F0
-label_14D3:
-  ld    $1A
-  bnz   label_14F0
-  mov   #$1E, $1A
-  br    label_14F0
-label_14DC:
-  ld    $1F
-  bnz   label_14E9
-  ld    $1A
-  bnz   label_14F0
-  mov   #$1C, $1A
-  br    label_14F0
-label_14E9:
-  ld    $1A
-  bnz   label_14F0
-  mov   #$1D, $1A
-label_14F0:
-  call  label_162B
-  jmp   label_1413
-label_14F4:
-  callf label_3675
-  mov   #$00, SerialTimeout
-label_14FA:
-  callf label_3718
-  mov   #$00, $1D
-  be    #$10, label_1531
-  be    #$20, label_1531
-  be    #$01, label_1511
-  be    #$02, label_1520
-  be    #$FF, label_1531
-  br    label_14FA
-label_1511:
-  inc   $1B
-  ld    $1B
-  be    #$17, label_152A
-  bp    psw, cy, label_152A
-  mov   #$00, $1B
-  br    label_152A
-label_1520:
-  dec   $1B
-  ld    $1B
-  bne   #$FF, label_152A
-  mov   #$17, $1B
-label_152A:
-  mov   #$01, $61
-  call  label_164E
-  br    label_14FA
-label_1531:
+.inc:
+  inc   Day
+  ld    Month
+  be    #$02, .incFeb
+  be    #$04, .inc30
+  be    #$06, .inc30
+  be    #$09, .inc30
+  be    #$0B, .inc30
+  ld    Day
+  be    #$1F, .redraw
+  bp    psw, cy, .redraw
+  mov   #$01, Day
+  br    .redraw
+.inc30:
+  ld    Day
+  be    #$1E, .redraw
+  bp    psw, cy, .redraw
+  mov   #$01, Day
+  br    .redraw
+.incFeb:
+  ld    LeapYear
+  bnz   .incFebLeap
+  ld    Day
+  be    #$1C, .redraw
+  bp    psw, cy, .redraw
+  mov   #$01, Day
+  br    .redraw
+.incFebLeap:
+  ld    Day
+  be    #$1D, .redraw
+  bp    psw, cy, .redraw
+  mov   #$01, Day
+  br    .redraw
+.dec:
+  dec   Day
+  ld    Month
+  be    #$02, .decFeb
+  be    #$04, .dec30
+  be    #$06, .dec30
+  be    #$09, .dec30
+  be    #$0B, .dec30
+  ld    Day
+  bnz   .redraw
+  mov   #$1F, Day
+  br    .redraw
+.dec30:
+  ld    Day
+  bnz   .redraw
+  mov   #$1E, Day
+  br    .redraw
+.decFeb:
+  ld    LeapYear
+  bnz   .decFebLeap
+  ld    Day
+  bnz   .redraw
+  mov   #$1C, Day
+  br    .redraw
+.decFebLeap:
+  ld    Day
+  bnz   .redraw
+  mov   #$1D, Day
+.redraw:
+  call  DrawDay
+  jmp   .loop
+;; -----------------------------------------------------------------------------
+;; SetClockEditHour ($14F4)
+;; Up/Down change the hour (0-23, wrapping).
+;; -----------------------------------------------------------------------------
+SetClockEditHour:
+  callf WaitAllButtonsReleased
+  mov   #$00, HalfSecTicks
+.loop:
+  callf WaitKeyEventRepeat
+  mov   #$00, Second
+  be    #$10, .return
+  be    #$20, .return
+  be    #$01, .inc
+  be    #$02, .dec
+  be    #$FF, .return
+  br    .loop
+.inc:
+  inc   Hour
+  ld    Hour
+  be    #$17, .redraw
+  bp    psw, cy, .redraw
+  mov   #$00, Hour
+  br    .redraw
+.dec:
+  dec   Hour
+  ld    Hour
+  bne   #$FF, .redraw
+  mov   #$17, Hour
+.redraw:
+  mov   #$01, CursorY
+  call  DrawHour
+  br    .loop
+.return:
   ret
-label_1532:
-  callf label_3675
-  mov   #$00, SerialTimeout
-label_1538:
-  callf label_3718
-  mov   #$00, $1D
-  be    #$10, label_156F
-  be    #$20, label_156F
-  be    #$01, label_154F
-  be    #$02, label_155E
-  be    #$FF, label_156F
-  br    label_1538
-label_154F:
-  inc   $1C
-  ld    $1C
-  be    #$3B, label_1568
-  bp    psw, cy, label_1568
-  mov   #$00, $1C
-  br    label_1568
-label_155E:
-  dec   $1C
-  ld    $1C
-  bne   #$FF, label_1568
-  mov   #$3B, $1C
-label_1568:
-  mov   #$01, $61
-  call  label_1671
-  br    label_1538
-label_156F:
+;; -----------------------------------------------------------------------------
+;; SetClockEditMinute ($1532)
+;; Up/Down change the minute (0-59, wrapping).
+;; -----------------------------------------------------------------------------
+SetClockEditMinute:
+  callf WaitAllButtonsReleased
+  mov   #$00, HalfSecTicks
+.loop:
+  callf WaitKeyEventRepeat
+  mov   #$00, Second
+  be    #$10, .return
+  be    #$20, .return
+  be    #$01, .inc
+  be    #$02, .dec
+  be    #$FF, .return
+  br    .loop
+.inc:
+  inc   Minute
+  ld    Minute
+  be    #$3B, .redraw
+  bp    psw, cy, .redraw
+  mov   #$00, Minute
+  br    .redraw
+.dec:
+  dec   Minute
+  ld    Minute
+  bne   #$FF, .redraw
+  mov   #$3B, Minute
+.redraw:
+  mov   #$01, CursorY
+  call  DrawMinute
+  br    .loop
+.return:
   ret
-label_1570:
-  callf label_3675
+;; -----------------------------------------------------------------------------
+;; SetClockConfirm ($1570)
+;; "OK ?" with a Yes/No choice (Left/Right). A on Yes -> ACC = 0 (done),
+;; A on No or B -> ACC = $20 (go back to the minute field).
+;; -----------------------------------------------------------------------------
+SetClockConfirm:
+  callf WaitAllButtonsReleased
   mov   #$00, b
-  mov   #$00, SerialTimeout
-label_1579:
-  callf label_3696
-  mov   #$00, $1D
-  be    #$10, label_159E
-  be    #$20, label_15AA
-  be    #$04, label_1590
-  be    #$08, label_1590
-  be    #$FF, label_15AA
-  br    label_1579
-label_1590:
+  mov   #$00, HalfSecTicks
+.loop:
+  callf WaitKeyEvent
+  mov   #$00, Second
+  be    #$10, .select
+  be    #$20, .return
+  be    #$04, .toggle
+  be    #$08, .toggle
+  be    #$FF, .return
+  br    .loop
+.toggle:
   ld    b
   xor   #$FF
   st    b
-  callf label_1F47
-  callf label_3662
-  br    label_1579
-label_159E:
+  callf DrawYesNoChoice
+  callf WaitDpadReleased
+  br    .loop
+.select:
   ld    b
-  bz    label_15A7
+  bz    .no
   mov   #$00, acc
-  br    label_15AA
-label_15A7:
+  br    .return
+.no:
   mov   #$20, acc
-label_15AA:
+.return:
   ret
-label_15AB:
+;; -----------------------------------------------------------------------------
+;; DrawYear ($15AB)
+;; Year (YearHi:YearLo) as 4 big digits at column 2 of row CursorY.
+;; -----------------------------------------------------------------------------
+DrawYear:
   clr1  p3int, $00
-  mov   #$17, $00
-  callf label_351A
-  mov   #$52, $00
-  mov   #$02, $60
-  callf label_3B30
+  mov   #YearHi, $00
+  callf Bin16ToBcd                      ; Bin16ToBcd -> MathHi:MathLo
+  mov   #MathHi, $00
+  mov   #$02, CursorX
+  callf DrawBcd16Big
   set1  p3int, $00
   ret
-label_15BF:
+;; -----------------------------------------------------------------------------
+;; DrawMonthName ($15BF)
+;; Three-letter month name from MonthNames in big glyphs at columns 3-5.
+;; The big font has no lower case: glyph = ASCII - $31 maps 'A' to glyph $10.
+;; -----------------------------------------------------------------------------
+DrawMonthName:
   push  b
   push  c
   push  trh
   push  trl
   clr1  p3int, $00
-  mov   #$F7, trl
-  mov   #$15, trh
-  ld    $19
+  mov   #<MonthNames, trl
+  mov   #>MonthNames, trh
+  ld    Month
   and   #$0F
   rol
   rol
   st    b
   mov   #$03, c
-  mov   #$03, $60
-label_15DD:
+  mov   #$03, CursorX
+.loop:
   ld    b
   inc   b
   ldc
   sub   #$31
-  callf label_38F0
-  inc   $60
-  dbnz  c, label_15DD
+  callf DrawGlyph8x8
+  inc   CursorX
+  dbnz  c, .loop
   set1  p3int, $00
   pop   trl
   pop   trh
@@ -2448,6 +2872,7 @@ label_15DD:
   pop   b
   ret
 
+MonthNames:
   .string 4 "    "
   .string 4 "JAN"
   .string 4 "FEB"
@@ -2462,201 +2887,246 @@ label_15DD:
   .string 4 "NOV"
   .string 4 "DEC"
 
-label_162B:
+;; -----------------------------------------------------------------------------
+;; DrawDay ($162B)
+;; Day at column 0 of row CursorY, big digits; one digit is drawn after a blank cell.
+;; -----------------------------------------------------------------------------
+DrawDay:
   clr1  p3int, $00
-  ld    $1A
-  be    #$09, label_1640
-  bp    psw, cy, label_1640
-  callf label_34FA
-  mov   #$00, $60
-  callf label_3B05
-  br    label_164B
-label_1640:
-  mov   #$00, $60
-  callf label_39A1
-  inc   $60
-  callf label_38F0
-label_164B:
+  ld    Day
+  be    #$09, .oneDigit
+  bp    psw, cy, .oneDigit
+  callf BinToBcd
+  mov   #$00, CursorX
+  callf DrawBcdByteBig
+  br    .return
+.oneDigit:
+  mov   #$00, CursorX
+  callf ClearCell8x8
+  inc   CursorX
+  callf DrawGlyph8x8
+.return:
   set1  p3int, $00
   ret
-label_164E:
+;; -----------------------------------------------------------------------------
+;; DrawHour ($164E)
+;; Hour at column 1 (single digit after a blank), big digits. Out: ACC = BCD hour.
+;; -----------------------------------------------------------------------------
+DrawHour:
   clr1  p3int, $00
-  ld    $1B
-  be    #$09, label_1663
-  bp    psw, cy, label_1663
-  callf label_34FA
-  mov   #$01, $60
-  callf label_3B05
-  br    label_166E
-label_1663:
-  mov   #$01, $60
-  callf label_39A1
-  inc   $60
-  callf label_38F0
-label_166E:
+  ld    Hour
+  be    #$09, .oneDigit
+  bp    psw, cy, .oneDigit
+  callf BinToBcd
+  mov   #$01, CursorX
+  callf DrawBcdByteBig
+  br    .return
+.oneDigit:
+  mov   #$01, CursorX
+  callf ClearCell8x8
+  inc   CursorX
+  callf DrawGlyph8x8
+.return:
   set1  p3int, $00
   ret
-label_1671:
+;; -----------------------------------------------------------------------------
+;; DrawMinute ($1671)
+;; Minute at columns 4-5, big digits. Out: ACC = BCD minute.
+;; -----------------------------------------------------------------------------
+DrawMinute:
   clr1  p3int, $00
-  ld    $1C
-  callf label_34FA
-  mov   #$04, $60
-  callf label_3B05
+  ld    Minute
+  callf BinToBcd
+  mov   #$04, CursorX
+  callf DrawBcdByteBig
   set1  p3int, $00
   ret
-label_1681:
+;; -----------------------------------------------------------------------------
+;; SetClockShowYear ($1681)
+;; Screen for the year field: up/down arrows above/below the year, ":Select" hint.
+;; -----------------------------------------------------------------------------
+SetClockShowYear:
   clr1  p3int, $00
-  mov   #$05, $60
-  mov   #$00, $61
+  mov   #$05, CursorX
+  mov   #$00, CursorY
   mov   #$0C, acc
-  callf label_38F0
-  mov   #$02, $61
+  callf DrawGlyph8x8
+  mov   #$02, CursorY
   mov   #$0B, acc
-  callf label_38F0
-  mov   #$01, $61
-  call  label_15AB
-  mov   #$5D, trl
-  mov   #$19, trh     ; Load string ":Select"
-  mov   #$00, $60
-  mov   #$03, $61
+  callf DrawGlyph8x8
+  mov   #$01, CursorY
+  call  DrawYear
+  mov   #<Str_SelectHint, trl
+  mov   #>Str_SelectHint, trh
+  mov   #$00, CursorX
+  mov   #$03, CursorY
   callf DrawString
   set1  p3int, $00
   ret
-label_16AF:
+;; -----------------------------------------------------------------------------
+;; SetClockShowMonth ($16AF)
+;; Screen for the month field: month name + day, arrows over the month.
+;; -----------------------------------------------------------------------------
+SetClockShowMonth:
   push  b
   clr1  p3int, $00
-  mov   #$00, $61
-  mov   #$00, $67
+  mov   #$00, CursorY
+  mov   #$00, TextInvert
   mov   #$02, b
-label_16BC:
-  mov   #$01, $60
-  callf label_39A1
-  mov   #$02, $61
-  dbnz  b, label_16BC
-  mov   #$02, $60
-  mov   #$01, $61
-  callf label_39A1
-  mov   #$05, $60
-  mov   #$00, $61
+.clear:
+  mov   #$01, CursorX
+  callf ClearCell8x8
+  mov   #$02, CursorY
+  dbnz  b, .clear
+  mov   #$02, CursorX
+  mov   #$01, CursorY
+  callf ClearCell8x8
+  mov   #$05, CursorX
+  mov   #$00, CursorY
   mov   #$0C, acc
-  callf label_38F0
-  mov   #$02, $61
+  callf DrawGlyph8x8
+  mov   #$02, CursorY
   mov   #$0B, acc
-  callf label_38F0
-  mov   #$01, $61
-  call  label_15BF
-  call  label_162B
+  callf DrawGlyph8x8
+  mov   #$01, CursorY
+  call  DrawMonthName
+  call  DrawDay
   set1  p3int, $00
   pop   b
   ret
-label_16F2:
+;; -----------------------------------------------------------------------------
+;; SetClockShowDay ($16F2)
+;; Screen for the day field: arrows over the day.
+;; -----------------------------------------------------------------------------
+SetClockShowDay:
   push  b
   clr1  p3int, $00
-  mov   #$00, $61
-  mov   #$00, $67
+  mov   #$00, CursorY
+  mov   #$00, TextInvert
   mov   #$02, b
-label_16FF:
-  mov   #$02, $60
-  callf label_39A1
-  mov   #$05, $60
-  callf label_39A1
-  mov   #$02, $61
-  dbnz  b, label_16FF
-  mov   #$02, $60
-  mov   #$01, $61
-  callf label_39A1
-  mov   #$01, $60
-  mov   #$00, $61
+.clear:
+  mov   #$02, CursorX
+  callf ClearCell8x8
+  mov   #$05, CursorX
+  callf ClearCell8x8
+  mov   #$02, CursorY
+  dbnz  b, .clear
+  mov   #$02, CursorX
+  mov   #$01, CursorY
+  callf ClearCell8x8
+  mov   #$01, CursorX
+  mov   #$00, CursorY
   mov   #$0C, acc
-  callf label_38F0
-  mov   #$02, $61
+  callf DrawGlyph8x8
+  mov   #$02, CursorY
   mov   #$0B, acc
-  callf label_38F0
-  mov   #$01, $61
-  call  label_15BF
-  call  label_162B
+  callf DrawGlyph8x8
+  mov   #$01, CursorY
+  call  DrawMonthName
+  call  DrawDay
   set1  p3int, $00
   pop   b
   ret
-label_173B:
+;; -----------------------------------------------------------------------------
+;; SetClockShowHour ($173B)
+;; Screen for the hour field: HH:MM with arrows over the hour.
+;; -----------------------------------------------------------------------------
+SetClockShowHour:
   push  b
-  mov   #$00, $1D
+  mov   #$00, Second
   clr1  p3int, $00
-  mov   #$00, $61
-  mov   #$00, $67
+  mov   #$00, CursorY
+  mov   #$00, TextInvert
   mov   #$02, b
-label_174B:
-  mov   #$01, $60
-  callf label_39A1
-  mov   #$05, $60
-  callf label_39A1
-  mov   #$02, $61
-  dbnz  b, label_174B
-  mov   #$00, $60
-  mov   #$01, $61
-  callf label_39A1
-  mov   #$02, $60
-  mov   #$00, $61
+.clear:
+  mov   #$01, CursorX
+  callf ClearCell8x8
+  mov   #$05, CursorX
+  callf ClearCell8x8
+  mov   #$02, CursorY
+  dbnz  b, .clear
+  mov   #$00, CursorX
+  mov   #$01, CursorY
+  callf ClearCell8x8
+  mov   #$02, CursorX
+  mov   #$00, CursorY
   mov   #$0C, acc
-  callf label_38F0
-  mov   #$02, $61
+  callf DrawGlyph8x8
+  mov   #$02, CursorY
   mov   #$0B, acc
-  callf label_38F0
-  mov   #$03, $60
-  mov   #$01, $61
+  callf DrawGlyph8x8
+  mov   #$03, CursorX
+  mov   #$01, CursorY
   mov   #$0A, acc
-  callf label_38F0
-  ld    $14
-  callf label_344B
-  st    $1B
-  call  label_164E
-  ld    $15
-  callf label_344B
-  st    $1C
-  call  label_1671
+  callf DrawGlyph8x8
+  ld    BcdHour
+  callf BcdToBin
+  st    Hour
+  call  DrawHour
+  ld    BcdMinute
+  callf BcdToBin
+  st    Minute
+  call  DrawMinute
   set1  p3int, $00
   pop   b
   ret
-label_179E:
-  mov   #$00, $1D
+;; -----------------------------------------------------------------------------
+;; SetClockShowMinute ($179E)
+;; Screen for the minute field: arrows over the minutes, ":Select" hint.
+;; -----------------------------------------------------------------------------
+SetClockShowMinute:
+  mov   #$00, Second
   clr1  p3int, $00
-  mov   #$00, $67
-  mov   #$00, $61
-  mov   #$02, $60
-  callf label_39A1
+  mov   #$00, TextInvert
+  mov   #$00, CursorY
+  mov   #$02, CursorX
+  callf ClearCell8x8
   mov   #$01, xbnk
-  callf label_3BCD
-  mov   #$5D, trl
-  mov   #$19, trh   ; Load string ":Select"
-  mov   #$00, $60
-  mov   #$03, $61
+  callf ClearHalfScreen
+  mov   #<Str_SelectHint, trl
+  mov   #>Str_SelectHint, trh
+  mov   #$00, CursorX
+  mov   #$03, CursorY
   callf DrawString
-  mov   #$05, $60
-  mov   #$00, $61
+  mov   #$05, CursorX
+  mov   #$00, CursorY
   mov   #$0C, acc
-  callf label_38F0
-  mov   #$02, $61
+  callf DrawGlyph8x8
+  mov   #$02, CursorY
   mov   #$0B, acc
-  callf label_38F0
+  callf DrawGlyph8x8
   set1  p3int, $00
   ret
-label_17DC:
-  mov   #$00, $1D
+;; -----------------------------------------------------------------------------
+;; SetClockShowConfirm ($17DC)
+;; "OK ?" prompt with the Yes/No choice, Yes highlighted.
+;; -----------------------------------------------------------------------------
+SetClockShowConfirm:
+  mov   #$00, Second
   clr1  p3int, $00
-  mov   #$00, $67
-  mov   #$00, $61
-  mov   #$05, $60
-  callf label_39A1
-  mov   #$66, trl
-  mov   #$19, trh   ; Load string "OK ?"
-  mov   #$00, $60
-  mov   #$02, $61
+  mov   #$00, TextInvert
+  mov   #$00, CursorY
+  mov   #$05, CursorX
+  callf ClearCell8x8
+  mov   #<Str_OkPrompt, trl
+  mov   #>Str_OkPrompt, trh
+  mov   #$00, CursorX
+  mov   #$02, CursorY
   callf DrawString
   mov   #$00, acc
-  callf label_1F47
+  callf DrawYesNoChoice
   set1  p3int, $00
   ret
-label_1805:
+;; -----------------------------------------------------------------------------
+;; ClockAnimationStep ($1805)
+;; Called once per second from ClockMode. ClockAnim layout:
+;;   bits 7-6 animal (0 dog, 1 fish, 2 bird), bit 5 sprite frame toggle,
+;;   bit 4 "resting" (draw the blank sprite), bits 3-0 position counter.
+;; AnimSequences holds, per animal, an end marker N followed by N-1 XRAM offsets
+;; (lower screen half, XBNK 1); the counter walks 1..N-1 and then wraps, flipping
+;; bit 4 so every other pass erases the trail with the blank sprite.
+;; -----------------------------------------------------------------------------
+ClockAnimationStep:
   push  acc
   push  trh
   push  trl
@@ -2664,16 +3134,16 @@ label_1805:
   push  c
   push  $02
   mov   #$01, xbnk
-  mov   #$07, trl
-  mov   #$19, trh
-  inc   $32
-  ld    $32
+  mov   #<AnimSequences, trl
+  mov   #>AnimSequences, trh
+  inc   ClockAnim
+  ld    ClockAnim
   and   #$C0
   rol
   rol
   st    b
-  bz    label_1838
-label_1826:
+  bz    .lookup
+.skipSequence:
   mov   #$00, acc
   ldc
   add   trl
@@ -2681,24 +3151,24 @@ label_1826:
   mov   #$00, acc
   addc  trh
   st    trh
-  dbnz  b, label_1826
-label_1838:
+  dbnz  b, .skipSequence
+.lookup:
   mov   #$00, acc
   ldc
   st    b
-  ld    $32
+  ld    ClockAnim
   and   #$0F
   xor   b
-  bz    label_188B
-  ld    $32
-  bp    acc, $04, label_187A
+  bz    .wrap
+  ld    ClockAnim
+  bp    acc, $04, .resting
   and   #$0F
   ldc
   or    #$80
   st    $02
-  mov   #$CF, trl
-  mov   #$18, trh
-  ld    $32
+  mov   #<AnimSprites, trl
+  mov   #>AnimSprites, trh
+  ld    ClockAnim
   and   #$E0
   ror
   ror
@@ -2707,9 +3177,9 @@ label_1838:
   mov   #$00, acc
   addc  trh
   st    trh
-  call  label_1897
-  not1  $32, $05
-label_186D:
+  call  BlitSprite8x8
+  not1  ClockAnim, $05
+.return:
   pop   $02
   pop   c
   pop   b
@@ -2717,352 +3187,430 @@ label_186D:
   pop   trh
   pop   acc
   ret
-label_187A:
+.resting:
   and   #$0F
   ldc
   or    #$80
   st    $02
-  mov   #$FF, trl
-  mov   #$18, trh
-  call  label_1897
-  br    label_186D
-label_188B:
-  ld    $32
+  mov   #<AnimSpriteBlank, trl
+  mov   #>AnimSpriteBlank, trh
+  call  BlitSprite8x8
+  br    .return
+.wrap:
+  ld    ClockAnim
   and   #$D0
-  st    $32
-  not1  $32, $04
-  inc   $32
-  br    label_1838
-label_1897:
+  st    ClockAnim
+  not1  ClockAnim, $04
+  inc   ClockAnim
+  br    .lookup
+;; -----------------------------------------------------------------------------
+;; BlitSprite8x8 ($1897)
+;; Copy 8 bytes from ROM (TRH:TRL) to XRAM at R2, stepping one LCD line per byte
+;; (lines are 6 bytes apart, with a 4-byte gap after every second line).
+;; -----------------------------------------------------------------------------
+BlitSprite8x8:
   push  acc
   push  b
   push  $02
   mov   #$00, acc
   mov   #$08, b
   push  acc
-label_18A5:
+.loop:
   ldc
   st    @R2
   ld    $02
   and   #$0F
-  be    #$05, label_18B7
-  bp    psw, cy, label_18B7
+  be    #$05, .nextLine
+  bp    psw, cy, .nextLine
   ld    $02
   add   #$04
   st    $02
-label_18B7:
+.nextLine:
   ld    $02
   add   #$06
   st    $02
   pop   acc
   inc   acc
   push  acc
-  dbnz  b, label_18A5
+  dbnz  b, .loop
   pop   acc
   pop   $02
   pop   b
   pop   acc
   ret
 
+;; -----------------------------------------------------------------------------
+;; AnimSprites ($18CF)
+;; Clock animation sprites, 8 bytes each: dog x2, fish x2, bird x2, then a blank one.
+;; -----------------------------------------------------------------------------
+AnimSprites:
   .byte $00, $08, $8E, $8E, $78, $78, $C8, $84, $00, $08, $8E, $8E, $78, $78, $48, $50
   .byte $30, $18, $BC, $FA, $FE, $BC, $30, $60, $30, $18, $BC, $FA, $FE, $BC, $30, $60
   .byte $E0, $76, $3D, $FE, $7C, $38, $40, $00, $06, $1D, $FE, $7C, $3C, $4E, $02, $00
-  .byte $00, $00, $00, $00, $00, $00, $00, $00, $07, $86, $91, $98, $A3, $AA, $B5, $07
+AnimSpriteBlank:
+  .byte $00, $00, $00, $00, $00, $00, $00, $00
+AnimSequences:
+  .byte $07, $86, $91, $98, $A3, $AA, $B5, $07
   .byte $90, $A1, $92, $A3, $94, $A5, $07, $B0, $A1, $A2, $93, $94, $85
 
+Str_AnimatedDisplay:
   .string 19 "Animated\r\n display"
+Str_Bird:
   .string 9 "Bird    "
+Str_Dog:
   .string 9 "Dog     "
+Str_Fish:
   .string 9 "Fish    "
+Str_SetClock:
   .string 19 "Set     \r\n   clock"
+Str_SelectHint:
   .byte $1A
   .string 8 ":Select"
+Str_OkPrompt:
   .string 9 "OK ?    "
 
-label_196F:
+;; -----------------------------------------------------------------------------
+;; FileManager ($196F)
+;; BiosMode 0 entry (also the return point after copy/delete). Sanity-checks the root
+;; block first; FsError bits from this check:
+;;   $40 root+$44 (root location) is not 255
+;;   $20 root+$46 (FAT location) is not 254 or in $C7-$E6
+;;   $10 root+$4A (directory location) is outside $C7-$E5 / $F1-$FD
+;; (a directory location in $E6-$F0 fails without setting a bit, showing code 00).
+;; Any failure shows "System error" with the FsError code in hex.
+;; -----------------------------------------------------------------------------
+FileManager:
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$44, trl
-  mov   #$00, $5C
-  ldf
-  bne   #$FF, label_1987
+  mov   #$00, FsError
+  ldf                                   ; root+$44 must be $00FF
+  bne   #$FF, .badRoot
   inc   trl
   ldf
-  bz    label_198D
-label_1987:
-  ld    $5C
+  bz    .checkFat
+.badRoot:
+  ld    FsError
   or    #$40
-  st    $5C
-label_198D:
+  st    FsError
+.checkFat:
   inc   trl
   ldf
   inc   trl
-  be    #$FE, label_19A1
-  be    #$C7, label_19A6
-  bp    psw, cy, label_19A6
-  be    #$E7, label_19A6
-  bn    psw, cy, label_19A6
-label_19A1:
+  be    #$FE, .fatHi
+  be    #$C7, .badFat
+  bp    psw, cy, .badFat
+  be    #$E7, .badFat
+  bn    psw, cy, .badFat
+.fatHi:
   ldf
-  bz    label_19AC
-  br    label_19A6
-label_19A6:
-  ld    $5C
+  bz    .checkDir
+  br    .badFat
+.badFat:
+  ld    FsError
   or    #$20
-  st    $5C
-label_19AC:
+  st    FsError
+.checkDir:
   mov   #$4A, trl
   ldf
   inc   trl
-  be    #$C7, label_19D5
-  bp    psw, cy, label_19D5
-  be    #$FE, label_19D5
-  bn    psw, cy, label_19D5
-  be    #$E6, label_19CC
-  bp    psw, cy, label_19CC
-  be    #$F1, label_19CC
-  bn    psw, cy, label_19CC
-  br    label_19DB
-label_19CC:
+  be    #$C7, .badDir
+  bp    psw, cy, .badDir
+  be    #$FE, .badDir
+  bn    psw, cy, .badDir
+  be    #$E6, .dirHi
+  bp    psw, cy, .dirHi
+  be    #$F1, .dirHi
+  bn    psw, cy, .dirHi
+  br    FsSystemError
+.dirHi:
   ldf
-  bnz   label_19D5
-  ld    $5C
-  bnz   label_19DB
-  br    label_1A08
-label_19D5:
-  ld    $5C
+  bnz   .badDir
+  ld    FsError
+  bnz   FsSystemError
+  br    FileList
+.badDir:
+  ld    FsError
   or    #$10
-  st    $5C
-label_19DB:
+  st    FsError
+;; -----------------------------------------------------------------------------
+;; FsSystemError ($19DB)
+;; "System error" + FsError in hex on row 3; waits for MODE or a controller.
+;; -----------------------------------------------------------------------------
+FsSystemError:
   clr1  p3int, $00
-  mov   #$E5, trl
-  mov   #$20, trh   ; Load string "System error"
-  mov   #$00, $60
-  mov   #$00, $61
+  mov   #<Str_SystemError, trl
+  mov   #>Str_SystemError, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
   mov   #$01, xbnk
-  callf label_3BCD
-  ld    $5C
-  mov   #$06, $60
-  mov   #$03, $61
-  callf label_3AD6
-label_19FD:
-  callf label_3696
-  be    #$FF, label_1A06
-  bne   #$FD, label_19FD
-label_1A06:
-  jmp   label_1B68
-label_1A08:
+  callf ClearHalfScreen
+  ld    FsError
+  mov   #$06, CursorX
+  mov   #$03, CursorY
+  callf DrawHexByte
+.wait:
+  callf WaitKeyEvent
+  be    #$FF, .exit
+  bne   #$FD, .wait
+.exit:
+  jmp   FileManagerExit
+;; -----------------------------------------------------------------------------
+;; FileList ($1A08)
+;; Shows the free-block summary until A or Right is pressed (or ~6.5 s pass), then
+;; scans the directory and shows one file at a time. If another VMU is connected
+;; (WaitKeyEvent returns $FC) it switches to CopyReceive.
+;; Keys in the list: Up/Down step SelectedFile through 1..FileCount (wrapping),
+;; Right shows details, B / Left go back to the summary.
+;; -----------------------------------------------------------------------------
+FileList:
   clr1  p3int, $00
-  call  label_1BC7
+  call  DrawFreeBlocksScreen
   set1  p3int, $00
-  mov   #$00, $3C
-  mov   #$01, NBlocksToWrite
-  mov   #$01, $33
-label_1A17:
+  mov   #$00, SelectedFileHi            ; SelectedFile = 1
+  mov   #$01, SelectedFile
+  mov   #$01, IdleTicks
+FileList_summaryLoop:
   set1  pcon, $00
-  ld    $30
-  bz    label_1A1F
-  jmp   label_1B68
-label_1A1F:
-  ld    $35
-  bnz   label_1A47
+  ld    BiosMode
+  bz    .stillFileMode
+  jmp   FileManagerExit
+.stillFileMode:
+  ld    SleepCtl
+  bnz   FileListScan_sleep
   ld    p7
   and   #$01
-  bnz   label_1A4C
-  ld    $33
-  be    #$0D, label_1A34
-  ld    $70
+  bnz   FileListScan_exit
+  ld    IdleTicks
+  be    #$0D, FileListScan              ; 13 half-second ticks on the summary screen, then scan anyway
+  ld    Buttons_Current
   and   #$18
-  bz    label_1A17
-label_1A34:
+  bz    FileList_summaryLoop
+;; -----------------------------------------------------------------------------
+;; FileListScan ($1A34)
+;; (Re)scan the directory and draw the current entry. Also the return point after a
+;; delete. FileCount == 0 -> FileListEmpty.
+;; -----------------------------------------------------------------------------
+FileListScan:
   clr1  p3int, $00
-  callf label_3C07
-  call  label_1C01
+  callf ClearScreen
+  call  CountFiles
   set1  p3int, $00
-  ld    $5C
-  bnz   label_19DB
-  ld    $3B
-  bnz   label_1A4E
-  jmp   label_1B33
-label_1A47:
-  callf label_0421
-  br    label_1A17
-label_1A4C:
-  jmp   label_1B68
-label_1A4E:
+  ld    FsError
+  bnz   FsSystemError
+  ld    FileCount
+  bnz   FileListScan_showEntry
+  jmp   FileListEmpty
+FileListScan_sleep:
+  callf SleepUntilWake
+  br    FileList_summaryLoop
+FileListScan_exit:
+  jmp   FileManagerExit
+FileListScan_showEntry:
   clr1  p3int, $00
-  call  label_1CED
-  call  label_1D10
-  mov   #$01, $33
-  ld    $2B
-  bnz   label_1A5E
-  mov   #$01, $2B
-label_1A5E:
-  callf label_3718
-  be    #$FC, label_1A7B
-  be    #$FF, label_1A7E
-  be    #$FD, label_1A7E
-  be    #$01, label_1A80
-  be    #$02, label_1A94
-  be    #$08, label_1AA6
-  be    #$20, label_1A08
-  be    #$04, label_1A08
-  br    label_1A5E
-label_1A7B:
-  jmpf  label_27AE
-label_1A7E:
-  jmp   label_1B68
-label_1A80:
-  inc   NBlocksToWrite
-  ld    NBlocksToWrite
-  sub   $3B
-  bne   #$01, label_1A8C
-  mov   #$01, NBlocksToWrite
-label_1A8C:
+  call  DrawFileCounter
+  call  DrawFileEntry
+  mov   #$01, IdleTicks
+  ld    CopyRxArm                       ; first time here: arm VMU-to-VMU receive
+  bnz   FileListLoop
+  mov   #$01, CopyRxArm
+FileListLoop:
+  callf WaitKeyEventRepeat
+  be    #$FC, FileListLoop_receive
+  be    #$FF, FileListLoop_exit
+  be    #$FD, FileListLoop_exit
+  be    #$01, FileListNext
+  be    #$02, FileListPrev
+  be    #$08, FileDetails
+  be    #$20, FileList
+  be    #$04, FileList
+  br    FileListLoop
+FileListLoop_receive:
+  jmpf  CopyReceive
+FileListLoop_exit:
+  jmp   FileManagerExit
+;; -----------------------------------------------------------------------------
+;; FileListNext ($1A80)
+;; Select the next file, wrapping to 1 after FileCount.
+;; -----------------------------------------------------------------------------
+FileListNext:
+  inc   SelectedFile
+  ld    SelectedFile
+  sub   FileCount
+  bne   #$01, .redraw
+  mov   #$01, SelectedFile
+.redraw:
   clr1  p3int, $00
-  call  label_1D10
+  call  DrawFileEntry
   set1  p3int, $00
-  br    label_1A5E
-label_1A94:
-  dec   NBlocksToWrite
-  ld    NBlocksToWrite
-  bnz   label_1A9E
-  ld    $3B
-  st    NBlocksToWrite
-label_1A9E:
+  br    FileListLoop
+;; -----------------------------------------------------------------------------
+;; FileListPrev ($1A94)
+;; Select the previous file, wrapping to FileCount below 1.
+;; -----------------------------------------------------------------------------
+FileListPrev:
+  dec   SelectedFile
+  ld    SelectedFile
+  bnz   .redraw
+  ld    FileCount
+  st    SelectedFile
+.redraw:
   clr1  p3int, $00
-  call  label_1D10
+  call  DrawFileEntry
   set1  p3int, $00
-  br    label_1A5E
-label_1AA6:
+  br    FileListLoop
+;; -----------------------------------------------------------------------------
+;; FileDetails ($1AA6)
+;; Details for the selected file: 16-char VMS description on rows 1-2, type and size
+;; on row 3. Up/Down go straight to the next/previous file, B/Left back to the list,
+;; Right opens the Copy/Delete menu. Receiving from another VMU is disarmed here.
+;; -----------------------------------------------------------------------------
+FileDetails:
   clr1  p3int, $00
-  callf label_3C07
-  call  label_1DB7
-  ld    $5C
-  bnz   label_1AC0
-  call  label_1E61
-  call  label_1E98
-  mov   #$01, $33
-  ld    $2B
-  be    #$FF, label_1AC0
-  mov   #$00, $2B
-label_1AC0:
-  callf label_3718
-  be    #$FF, label_1A7E
-  be    #$FD, label_1A7E
-  be    #$01, label_1ADA
-  be    #$02, label_1ADA
-  be    #$08, label_1AEB
-  be    #$20, label_1ADA
-  be    #$04, label_1ADA
-  br    label_1AC0
-label_1ADA:
+  callf ClearScreen
+  call  DrawVmsDescription
+  ld    FsError
+  bnz   .loop
+  call  DrawFileType
+  call  DrawFileSize
+  mov   #$01, IdleTicks
+  ld    CopyRxArm
+  be    #$FF, .loop
+  mov   #$00, CopyRxArm
+.loop:
+  callf WaitKeyEventRepeat
+  be    #$FF, FileListLoop_exit
+  be    #$FD, FileListLoop_exit
+  be    #$01, .back
+  be    #$02, .back
+  be    #$08, FileActionMenu
+  be    #$20, .back
+  be    #$04, .back
+  br    .loop
+.back:
   clr1  p3int, $00
-  callf label_3C07
-  call  label_1CED
-  be    #$02, label_1A94
-  be    #$01, label_1A80
-  call  label_1D10
-  jmp   label_1A5E
-label_1AEB:
-  call  label_1EC9
-label_1AED:
-  call  label_1EEB
-  mov   #$01, $33
-label_1AF2:
-  callf label_3718
-  be    #$FF, label_1B68
-  be    #$FD, label_1B68
-  be    #$01, label_1B0F
-  be    #$02, label_1B0F
-  be    #$10, label_1B0C
-  be    #$20, label_1AA6
-  be    #$04, label_1AA6
-  br    label_1AF2
-label_1B0C:
-  jmpf  label_2162
-label_1B0F:
-  call  label_1F19
-  mov   #$01, $33
-label_1B14:
-  callf label_3718
-  be    #$FF, label_1B68
-  be    #$FD, label_1B68
-  be    #$01, label_1AED
-  be    #$02, label_1AED
-  be    #$10, label_1B30
-  be    #$20, label_1B2E
-  be    #$04, label_1B2E
-  br    label_1B14
-label_1B2E:
-  jmp   label_1AA6
-label_1B30:
-  jmpf  label_2DA5
-label_1B33:
+  callf ClearScreen
+  call  DrawFileCounter
+  be    #$02, FileListPrev
+  be    #$01, FileListNext
+  call  DrawFileEntry
+  jmp   FileListLoop
+;; -----------------------------------------------------------------------------
+;; FileActionMenu ($1AEB)
+;; "Copy" / "Delete" menu (Up/Down toggles the highlight). A runs the highlighted
+;; action (FileCopy / FileDelete), B / Left return to FileDetails.
+;; -----------------------------------------------------------------------------
+FileActionMenu:
+  call  DrawYesHint
+.copyHighlighted:
+  call  DrawActionMenuCopy
+  mov   #$01, IdleTicks
+.copyLoop:
+  callf WaitKeyEventRepeat
+  be    #$FF, FileManagerExit
+  be    #$FD, FileManagerExit
+  be    #$01, .deleteHighlighted
+  be    #$02, .deleteHighlighted
+  be    #$10, .doCopy
+  be    #$20, FileDetails
+  be    #$04, FileDetails
+  br    .copyLoop
+.doCopy:
+  jmpf  FileCopy
+.deleteHighlighted:
+  call  DrawActionMenuDelete
+  mov   #$01, IdleTicks
+.deleteLoop:
+  callf WaitKeyEventRepeat
+  be    #$FF, FileManagerExit
+  be    #$FD, FileManagerExit
+  be    #$01, .copyHighlighted
+  be    #$02, .copyHighlighted
+  be    #$10, .doDelete
+  be    #$20, .back
+  be    #$04, .back
+  br    .deleteLoop
+.back:
+  jmp   FileDetails
+.doDelete:
+  jmpf  FileDelete
+;; -----------------------------------------------------------------------------
+;; FileListEmpty ($1B33)
+;; "No saved files"; B / Left -> summary, another VMU -> CopyReceive.
+;; -----------------------------------------------------------------------------
+FileListEmpty:
   clr1  p3int, $00
-  mov   #$F8, trl
-  mov   #$20, trh   ; Load string "No saved files"
-  mov   #$00, $60
-  mov   #$00, $61
+  mov   #<Str_NoSavedFiles, trl
+  mov   #>Str_NoSavedFiles, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
   mov   #$01, xbnk
-  callf label_3BCD
-  mov   #$01, $33
-  mov   #$01, $2B
-label_1B50:
-  callf label_3696
-  be    #$FC, label_1B66
-  be    #$FF, label_1B68
-  be    #$FD, label_1B68
-  be    #$20, label_1B64
-  be    #$04, label_1B64
-  br    label_1B50
-label_1B64:
-  jmp   label_1A08
-label_1B66:
-  jmp   label_1A7B
-label_1B68:
-  jmpf  label_02EF
-label_1B6B:
-  mov   #$00, $36
-  mov   #$00, $37
+  callf ClearHalfScreen
+  mov   #$01, IdleTicks
+  mov   #$01, CopyRxArm
+.loop:
+  callf WaitKeyEvent
+  be    #$FC, .receive
+  be    #$FF, FileManagerExit
+  be    #$FD, FileManagerExit
+  be    #$20, .back
+  be    #$04, .back
+  br    .loop
+.back:
+  jmp   FileList
+.receive:
+  jmp   FileListLoop_receive
+;; -----------------------------------------------------------------------------
+;; FileManagerExit ($1B68)
+;; Common exit to MainMenu.
+;; -----------------------------------------------------------------------------
+FileManagerExit:
+  jmpf  MainMenu
+;; -----------------------------------------------------------------------------
+;; CountFreeUserBlocks ($1B6B)
+;; Count $FFFC (free) FAT entries for blocks 0-199 into FreeUserBlocksHi:FreeUserBlocks.
+;; -----------------------------------------------------------------------------
+CountFreeUserBlocks:
+  mov   #$00, FreeUserBlocksHi
+  mov   #$00, FreeUserBlocks
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl   ; Read FAT First (0x1FE46)
   call  PrepareFlashBlockRead
   mov   #$C8, c
-label_1B82:
+.loop:
   ldf
   inc   trl
-  be    #$FC, label_1B8C
+  be    #$FC, .checkHi
   inc   trl
-  br    label_1B94
-label_1B8C:
+  br    .next
+.checkHi:
   ldf
   inc   trl
-  bne   #$FF, label_1B94
-  inc   $37
-label_1B94:
+  bne   #$FF, .next
+  inc   FreeUserBlocks
+.next:
   ld    trl
-  bnz   label_1B9A
+  bnz   .noCarry
   inc   trh
-label_1B9A:
-  dbnz  c, label_1B82
+.noCarry:
+  dbnz  c, .loop
   ret
 
-;; POST:
-;; NFreeBlocks=number of free game blocks
-;;
-;; Counts free blocks at the start of the volume
-;; Probably only used to count available blocks for storing a game
-;; because game data is written from the start of the volume and non-game data written from the end
 .org $1B9E
+;; -----------------------------------------------------------------------------
+;; CountFreeGameBlocks ($1B9E)
+;; Count the free ($FFFC) FAT entries at the very start of the volume (blocks 0-127)
+;; into FreeGameBlocks, stopping at the first used block: a game must occupy
+;; consecutive blocks from block 0, while data files are allocated from the top.
+;; -----------------------------------------------------------------------------
 CountFreeGameBlocks:
-  mov   #$00, $38
-  mov   #$00, NFreeBlocks
+  mov   #$00, FreeGameBlocksHi
+  mov   #$00, FreeGameBlocks
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
@@ -3076,110 +3624,126 @@ CountFreeGameBlocks:
   ldf
   bne   #$FF, .DoneCounting
   inc   trl
-  inc   NFreeBlocks             ; Found a free block.
+  inc   FreeGameBlocks             ; Found a free block.
   dbnz  c, .CheckNextBlock
 .DoneCounting:
   ret
 
-label_1BC7:
-  mov   #$00, $60
-  mov   #$00, $61
-  callf label_3C07
-  mov   #$C5, trl
-  mov   #$20, trh   ; Load string "Free ..."
+;; -----------------------------------------------------------------------------
+;; DrawFreeBlocksScreen ($1BC7)
+;; "Free" / "Game" summary: total free user blocks on row 0 and the number of free
+;; blocks at the start of the volume (usable for a game) on row 1.
+;; -----------------------------------------------------------------------------
+DrawFreeBlocksScreen:
+  mov   #$00, CursorX
+  mov   #$00, CursorY
+  callf ClearScreen
+  mov   #<Str_FreeGame, trl
+  mov   #>Str_FreeGame, trh
   callf DrawString
-  call  label_1B6B
+  call  CountFreeUserBlocks
   call  CountFreeGameBlocks
-  call  label_1C90
-  mov   #$36, $00
-  callf label_351A
-  mov   #$52, $00
-  mov   #$05, $60
-  mov   #$00, $61
-  callf label_3A97
-  mov   #$38, $00
-  callf label_351A
-  mov   #$52, $00
-  mov   #$01, $61
-  callf label_3A97
+  call  CountFreeExtraBlocks
+  mov   #FreeUserBlocksHi, $00
+  callf Bin16ToBcd
+  mov   #MathHi, $00
+  mov   #$05, CursorX
+  mov   #$00, CursorY
+  callf DrawBcd3Digits
+  mov   #FreeGameBlocksHi, $00
+  callf Bin16ToBcd
+  mov   #MathHi, $00
+  mov   #$01, CursorY
+  callf DrawBcd3Digits
   ret
-label_1C01:
+;; -----------------------------------------------------------------------------
+;; CountFiles ($1C01)
+;; Walk the directory (following the FAT chain from the root's directory location)
+;; and count non-empty entries into FileCountHi:FileCount. A broken chain sets
+;; FsError bit 2. Leaves the FAT address in FatBank/FatAddrHi/FatAddrLo.
+;; -----------------------------------------------------------------------------
+CountFiles:
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl
   call  PrepareFlashBlockRead
-  st    $54
+  st    FatBank
   ld    trh
-  st    $55
+  st    FatAddrHi
   ld    trl
-  st    $56
+  st    FatAddrLo
   mov   #$FE, trh
   mov   #$4A, trl
   call  PrepareFlashBlockRead
-  ld    $52
-  st    $58
-  mov   #$00, $3A
-  mov   #$00, $3B
-label_1C2B:
+  ld    MathHi
+  st    DirBlock
+  mov   #$00, FileCountHi
+  mov   #$00, FileCount
+.block:
   mov   #$10, c
-label_1C2E:
+.entry:
   ldf
-  bz    label_1C33
-  inc   $3B
-label_1C33:
+  bz    .nextEntry
+  inc   FileCount
+.nextEntry:
   ld    trl
   add   #$20
   st    trl
   ld    trh
   addc  #$00
   st    trh
-  dbnz  c, label_1C2E
-  ld    $54
+  dbnz  c, .entry
+  ld    FatBank
   st    fpr
   st    FlashBankTemp
-  ld    $55
+  ld    FatAddrHi
   st    trh
-  ld    $56
+  ld    FatAddrLo
   st    trl
-  ld    $58
+  ld    DirBlock
   clr1  psw, cy
   rolc
   st    c
   mov   #$00, acc
   rolc
-  st    $52
+  st    MathHi
   ld    trl
   add   c
   st    trl
   ld    trh
-  add   $52
+  add   MathHi
   st    trh
   ldf
-  bne   #$FA, label_1C79
+  bne   #$FA, .nextBlock
   inc   trl
   ldf
   dec   trl
-  be    #$FF, label_1C88
-  bz    label_1C79
-  br    label_1C89
-label_1C79:
+  be    #$FF, .return
+  bz    .nextBlock
+  br    .badChain
+.nextBlock:
   inc   trl
   ldf
-  bnz   label_1C89
+  bnz   .badChain
   dec   trl
   call  PrepareFlashBlockRead
-  ld    $52
-  st    $58
-  br    label_1C2B
-label_1C88:
+  ld    MathHi
+  st    DirBlock
+  br    .block
+.return:
   ret
-label_1C89:
-  ld    $5C
+.badChain:
+  ld    FsError
   or    #$04
-  st    $5C
+  st    FsError
   ret
-label_1C90:
+;; -----------------------------------------------------------------------------
+;; CountFreeExtraBlocks ($1C90)
+;; Count free FAT entries for blocks 200-230 (the area past the user blocks) into
+;; FreeExtraBlocksHi:FreeExtraBlocks. Only used by the copy-receive space check.
+;; -----------------------------------------------------------------------------
+CountFreeExtraBlocks:
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
@@ -3187,21 +3751,21 @@ label_1C90:
   call  PrepareFlashBlockRead
   mov   #$90, trl
   inc   trh
-  mov   #$00, NBytesToReceive
-  mov   #$00, $3F
+  mov   #$00, FreeExtraBlocksHi
+  mov   #$00, FreeExtraBlocks
   mov   #$1F, b
-label_1CAC:
+.loop:
   ldf
-  bne   #$FC, label_1CBA
+  bne   #$FC, .next
   inc   trl
   ldf
   dec   trl
-  bne   #$FF, label_1CBA
-  inc   $3F
-label_1CBA:
+  bne   #$FF, .next
+  inc   FreeExtraBlocks
+.next:
   inc   trl
   inc   trl
-  dbnz  b, label_1CAC
+  dbnz  b, .loop
   ret
 
 ;; PRE:
@@ -3218,7 +3782,7 @@ PrepareFlashBlockRead:
   clr1  psw, rambk0
   ldf                 ; Read FAT Block ID
   st    b
-  st    $52
+  st    MathHi
   mov   #$02, acc
   mov   #$00, c
 ; Multiply block ID (stored in b) by FAT block size 0x200 (stored in acc, c)
@@ -3237,123 +3801,140 @@ PrepareFlashBlockRead:
   pop   b
   ret
 
-label_1CED:
+;; -----------------------------------------------------------------------------
+;; DrawFileCounter ($1CED)
+;; "  n/ N" on row 0 (current index is drawn by DrawFileEntry) and the "/  /" date
+;; separators on row 3. Preserves ACC.
+;; -----------------------------------------------------------------------------
+DrawFileCounter:
   push  acc
-  mov   #$D0, trl
-  mov   #$20, trh     ; Read string "   /   ", probably file data would be filled into the blanks later.
-  mov   #$00, $60
-  mov   #$00, $61
+  mov   #<Str_FileCounter, trl
+  mov   #>Str_FileCounter, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
-  mov   #$3A, $00
-  callf label_351A
-  mov   #$52, $00
-  mov   #$05, $60
-  callf label_3A97
+  mov   #FileCountHi, $00
+  callf Bin16ToBcd
+  mov   #MathHi, $00
+  mov   #$05, CursorX
+  callf DrawBcd3Digits
   pop   acc
   ret
-label_1D10:
-  push  $60
-  push  $61
-  mov   #$3C, $00
-  callf label_351A
-  mov   #$52, $00
-  mov   #$01, $60
-  callf label_3A97
-  mov   #$00, $60
-  mov   #$01, $61
-  mov   #$00, $67
-  call  label_1F7B
-  ld    $5C
-  bnz   label_1D97
+;; -----------------------------------------------------------------------------
+;; DrawFileEntry ($1D10)
+;; Locate entry SelectedFile and draw it: index on row 0, 12-char name on rows 1-2
+;; (inverted if the file is copy protected), MM/DD/YY on row 3. On return TRH:TRL
+;; point at the entry. If the entry can't be found, "No saved files" + FsError.
+;; -----------------------------------------------------------------------------
+DrawFileEntry:
+  push  CursorX
+  push  CursorY
+  mov   #SelectedFileHi, $00
+  callf Bin16ToBcd
+  mov   #MathHi, $00
+  mov   #$01, CursorX
+  callf DrawBcd3Digits
+  mov   #$00, CursorX
+  mov   #$01, CursorY
+  mov   #$00, TextInvert                ; protected files are drawn inverted
+  call  FindDirEntryByIndex
+  ld    FsError
+  bnz   .notFound
   inc   trl
   ldf
-  bne   #$FF, label_1D3B
-  mov   #$FF, $67
-label_1D3B:
+  bne   #$FF, .name
+  mov   #$FF, TextInvert
+.name:
   inc   trl
   inc   trl
-  mov   #$08, c
-label_1D42:
+  mov   #$08, c                         ; 8 name characters on row 1
+.nameRow1:
   inc   trl
   ldf
-  callf label_37D2
-  inc   $60
-  dbnz  c, label_1D42
-  inc   $61
-  mov   #$00, $60
+  callf DrawChar6x8
+  inc   CursorX
+  dbnz  c, .nameRow1
+  inc   CursorY
+  mov   #$00, CursorX
   mov   #$04, c
-label_1D55:
+.nameRow2:
   inc   trl
   ldf
-  callf label_37D2
-  inc   $60
-  dbnz  c, label_1D55
-  mov   #$00, $67
+  callf DrawChar6x8
+  inc   CursorX
+  dbnz  c, .nameRow2
+  mov   #$00, TextInvert
   inc   trl
-  inc   $61
-  mov   #$00, $60
+  inc   CursorY
+  mov   #$00, CursorX
   inc   trl
   inc   trl
-  ldf
-  callf label_3AD6
-  inc   $60
-  inc   $60
-  inc   $60
+  ldf                                   ; timestamp month
+  callf DrawHexByte
+  inc   CursorX
+  inc   CursorX
+  inc   CursorX
   inc   trl
-  ldf
-  callf label_3AD6
-  inc   $60
-  inc   $60
-  inc   $60
+  ldf                                   ; timestamp day
+  callf DrawHexByte
+  inc   CursorX
+  inc   CursorX
+  inc   CursorX
   dec   trl
   dec   trl
-  ldf
-  callf label_3AD6
-  ld    trl
+  ldf                                   ; timestamp year
+  callf DrawHexByte
+  ld    trl                             ; back to the start of the entry
   sub   #$11
   st    trl
-label_1D92:
-  pop   $61
-  pop   $60
+.return:
+  pop   CursorY
+  pop   CursorX
   ret
-label_1D97:
-  mov   #$00, $60
-  mov   #$01, $61
-  mov   #$F8, trl
-  mov   #$20, trh   ; Load string "No saved files"
+.notFound:
+  mov   #$00, CursorX
+  mov   #$01, CursorY
+  mov   #<Str_NoSavedFiles, trl
+  mov   #>Str_NoSavedFiles, trh
   callf DrawString
-  ld    $5C
+  ld    FsError
   or    #$02
-  st    $5C
-  mov   #$06, $60
-  mov   #$03, $61
-  callf label_3AD6
-  br    label_1D92
-label_1DB7:
-  push  $60
-  push  $61
+  st    FsError
+  mov   #$06, CursorX
+  mov   #$03, CursorY
+  callf DrawHexByte
+  br    .return
+;; -----------------------------------------------------------------------------
+;; DrawVmsDescription ($1DB7)
+;; Follow the file's FAT chain to its header block (entry+$1A = header offset in
+;; blocks; must be < 256) and draw the first 16 bytes of the VMS header (the
+;; description) on rows 0-1. Any inconsistency -> "File is damaged" + FsError bit 0.
+;; -----------------------------------------------------------------------------
+DrawVmsDescription:
+  push  CursorX
+  push  CursorY
   push  FlashBankTemp
   push  trh
   push  trl
-  mov   #$00, $60
-  mov   #$01, $61
-  mov   #$00, $67
+  mov   #$00, CursorX
+  mov   #$01, CursorY
+  mov   #$00, TextInvert
   ld    trl
   add   #$1B
   st    trl
   ldf
-  bnz   label_1E41
+  bnz   .damaged
   dec   trl
   ldf
-  bz    label_1E06
+  bz    .headerInFirstBlock
   st    b
   ld    trl
   sub   #$18
   st    trl
-label_1DE0:
+.walk:
   inc   trl
   ldf
-  bnz   label_1E41
+  bnz   .damaged
   dec   trl
   ldf
   clr1  psw, cy
@@ -3361,81 +3942,85 @@ label_1DE0:
   st    c
   mov   #$00, acc
   rolc
-  add   $55
+  add   FatAddrHi
   st    trh
   ld    c
-  add   $56
+  add   FatAddrLo
   st    trl
-  ld    $54
+  ld    FatBank
   st    fpr
   st    FlashBankTemp
-  dbnz  b, label_1DE0
-  br    label_1E0C
-label_1E06:
+  dbnz  b, .walk
+  br    .readHeader
+.headerInFirstBlock:
   ld    trl
   sub   #$18
   st    trl
-label_1E0C:
+.readHeader:
   inc   trl
   ldf
-  bnz   label_1E41
+  bnz   .damaged
   dec   trl
   call  PrepareFlashBlockRead
   mov   #$02, b
-  mov   #$00, $61
-label_1E1B:
+  mov   #$00, CursorY
+.row:
   mov   #$08, c
-  mov   #$00, $60
-label_1E21:
+  mov   #$00, CursorX
+.char:
   ldf
-  callf label_37D2
+  callf DrawChar6x8
   inc   trl
-  inc   $60
-  dbnz  c, label_1E21
-  mov   #$01, $61
-  dbnz  b, label_1E1B
-label_1E32:
+  inc   CursorX
+  dbnz  c, .char
+  mov   #$01, CursorY
+  dbnz  b, .row
+.return:
   pop   trl
   pop   trh
   pop   FlashBankTemp
   ld    FlashBankTemp
   st    fpr
-  pop   $61
-  pop   $60
+  pop   CursorY
+  pop   CursorX
   ret
-label_1E41:
-  mov   #$00, $60
-  mov   #$00, $61
-  mov   #$0B, trl
-  mov   #$21, trh   ; Load string "File is damaged"
+.damaged:
+  mov   #$00, CursorX
+  mov   #$00, CursorY
+  mov   #<Str_FileDamaged, trl
+  mov   #>Str_FileDamaged, trh
   callf DrawString
-  ld    $5C
+  ld    FsError
   or    #$01
-  st    $5C
-  mov   #$06, $60
-  mov   #$03, $61
-  callf label_3AD6
-  br    label_1E32
-label_1E61:
+  st    FsError
+  mov   #$06, CursorX
+  mov   #$03, CursorY
+  callf DrawHexByte
+  br    .return
+;; -----------------------------------------------------------------------------
+;; DrawFileType ($1E61)
+;; "Data" ($33), "Game" ($CC) or "Other" on row 3.
+;; -----------------------------------------------------------------------------
+DrawFileType:
   push  FlashBankTemp
   push  trh
   push  trl
   ldf
-  be    #$33, label_1E76
-  be    #$CC, label_1E7E
-  mov   #$59, trl
-  mov   #$21, trh
-  br    label_1E84
-label_1E76:
-  mov   #$47, trl
-  mov   #$21, trh
-  br    label_1E84
-label_1E7E:
-  mov   #$50, trl
-  mov   #$21, trh   ; Load string "Game"
-label_1E84:
-  mov   #$00, $60
-  mov   #$03, $61
+  be    #$33, .data
+  be    #$CC, .game
+  mov   #<Str_TypeOther, trl
+  mov   #>Str_TypeOther, trh
+  br    .draw
+.data:
+  mov   #<Str_TypeData, trl
+  mov   #>Str_TypeData, trh
+  br    .draw
+.game:
+  mov   #<Str_TypeGame, trl
+  mov   #>Str_TypeGame, trh
+.draw:
+  mov   #$00, CursorX
+  mov   #$03, CursorY
   callf DrawString
   pop   trl
   pop   trh
@@ -3443,7 +4028,11 @@ label_1E84:
   ld    FlashBankTemp
   st    fpr
   ret
-label_1E98:
+;; -----------------------------------------------------------------------------
+;; DrawFileSize ($1E98)
+;; Size in blocks (entry+$18) at column 5 of row 2.
+;; -----------------------------------------------------------------------------
+DrawFileSize:
   push  FlashBankTemp
   push  trh
   push  trl
@@ -3451,101 +4040,123 @@ label_1E98:
   add   #$19
   st    trl
   ldf
-  st    $52
+  st    MathHi
   dec   trl
   ldf
-  st    $53
-  mov   #$52, $00
-  callf label_351A
-  mov   #$52, $00
-  mov   #$05, $60
-  mov   #$02, $61
-  callf label_3A97
+  st    MathLo
+  mov   #MathHi, $00
+  callf Bin16ToBcd
+  mov   #MathHi, $00
+  mov   #$05, CursorX
+  mov   #$02, CursorY
+  callf DrawBcd3Digits
   pop   trl
   pop   trh
   pop   FlashBankTemp
   ld    FlashBankTemp
   st    fpr
   ret
-label_1EC9:
+;; -----------------------------------------------------------------------------
+;; DrawYesHint ($1EC9)
+;; Clear the bottom half and draw the "A :Yes" hint on row 2.
+;; -----------------------------------------------------------------------------
+DrawYesHint:
   push  trh
   push  trl
   clr1  p3int, $00
   mov   #$01, xbnk
-  callf label_3BCD
-  mov   #$00, $60
-  mov   #$02, $61
-  mov   #$30, trl
-  mov   #$21, trh   ; Load string " :Yes"
+  callf ClearHalfScreen
+  mov   #$00, CursorX
+  mov   #$02, CursorY
+  mov   #<Str_YesHint, trl
+  mov   #>Str_YesHint, trh
   callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_1EEB:
+;; -----------------------------------------------------------------------------
+;; DrawActionMenuCopy ($1EEB)
+;; "Copy" (inverted) and "Delete".
+;; -----------------------------------------------------------------------------
+DrawActionMenuCopy:
   push  trh
   push  trl
   clr1  p3int, $00
-  mov   #$FF, $67
-  mov   #$1E, trl
-  mov   #$21, trh   ; Load string "Copy"
-  mov   #$00, $60
-  mov   #$00, $61
+  mov   #$FF, TextInvert
+  mov   #<Str_Copy, trl
+  mov   #>Str_Copy, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
-  mov   #$00, $67
-  mov   #$27, trl
-  mov   #$21, trh   ; Load string "Delete".
-  ; Note that certain "control characters" like 0xEF precede the string in some cases
-  ; Maybe these indicate that a special icon should be drawn at the position
-  mov   #$01, $61
+  mov   #$00, TextInvert
+  mov   #<Str_Delete, trl
+  mov   #>Str_Delete, trh
+ ; String prefixes like $EF are ordinary 6x8 font glyphs: $EF bullet, $1A/$1B bold
+ ; A/B button icons, $82 right arrow, $85 "No." sign, $17-$1A bold SEGA logo.
+  mov   #$01, CursorY
   callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_1F19:
+;; -----------------------------------------------------------------------------
+;; DrawActionMenuDelete ($1F19)
+;; "Copy" and "Delete" (inverted).
+;; -----------------------------------------------------------------------------
+DrawActionMenuDelete:
   push  trh
   push  trl
   clr1  p3int, $00
-  mov   #$1E, trl
-  mov   #$21, trh   ; Load string "Copy"
-  mov   #$00, $60
-  mov   #$00, $61
+  mov   #<Str_Copy, trl
+  mov   #>Str_Copy, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
-  mov   #$27, trl
-  mov   #$21, trh   ; Load string "Delete"
-  mov   #$FF, $67
-  mov   #$01, $61
+  mov   #<Str_Delete, trl
+  mov   #>Str_Delete, trh
+  mov   #$FF, TextInvert
+  mov   #$01, CursorY
   callf DrawString
-  mov   #$00, $67
+  mov   #$00, TextInvert
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_1F47:
+;; -----------------------------------------------------------------------------
+;; DrawYesNoChoice ($1F47)
+;; "Yes" / "No" on row 3, ACC != 0 highlights Yes, ACC == 0 highlights No.
+;; Preserves ACC (the callers keep their choice in it).
+;; -----------------------------------------------------------------------------
+DrawYesNoChoice:
   push  trh
   push  trl
-  bz    label_1F50
-  mov   #$FF, $67
-label_1F50:
-  mov   #$3D, trl
-  mov   #$21, trh   ; Load string "Yes"
-  mov   #$00, $60
-  mov   #$03, $61
+  bz    .yes
+  mov   #$FF, TextInvert
+.yes:
+  mov   #<Str_Yes, trl
+  mov   #>Str_Yes, trh
+  mov   #$00, CursorX
+  mov   #$03, CursorY
   callf DrawString
-  mov   #$00, $67
-  bnz   label_1F67
-  mov   #$FF, $67
-label_1F67:
-  mov   #$42, trl
-  mov   #$21, trh   ; Load string "No"
-  mov   #$04, $60
+  mov   #$00, TextInvert
+  bnz   .no
+  mov   #$FF, TextInvert
+.no:
+  mov   #<Str_No, trl
+  mov   #>Str_No, trh
+  mov   #$04, CursorX
   callf DrawString
-  mov   #$00, $67
+  mov   #$00, TextInvert
   pop   trl
   pop   trh
   ret
-label_1F7B:
+;; -----------------------------------------------------------------------------
+;; FindDirEntryByIndex ($1F7B)
+;; Point TRH:TRL (and FPR) at the SelectedFile-th used directory entry (1-based,
+;; only types $33/$CC count). Past the end of the directory FsError bit 7 is set.
+;; -----------------------------------------------------------------------------
+FindDirEntryByIndex:
   push  psw
   clr1  psw, rambk0
   mov   #$01, fpr
@@ -3553,50 +4164,55 @@ label_1F7B:
   mov   #$FE, trh
   mov   #$46, trl
   call  PrepareFlashBlockRead
-  st    $54
+  st    FatBank
   ld    trh
-  st    $55
+  st    FatAddrHi
   ld    trl
-  st    $56
+  st    FatAddrLo
   mov   #$FE, trh
   mov   #$4A, trl
   call  PrepareFlashBlockRead
-  ld    $52
-  st    $58
+  ld    MathHi
+  st    DirBlock
   mov   #$00, b
-label_1FA6:
+.block:
   mov   #$10, c
-label_1FA9:
+.entry:
   ldf
-  be    #$33, label_1FB2
-  be    #$CC, label_1FB2
-  br    label_1FBA
-label_1FB2:
+  be    #$33, .used
+  be    #$CC, .used
+  br    .next
+.used:
   inc   b
-  ld    NBlocksToWrite
+  ld    SelectedFile
   sub   b
-  bz    label_1FD2
-label_1FBA:
+  bz    .return
+.next:
   ld    trl
   add   #$20
   st    trl
   ld    trh
   addc  #$00
   st    trh
-  dbnz  c, label_1FA9
-  callf label_2043
-  ld    $5C
-  bnz   label_1FD5
-  br    label_1FA6
-label_1FD2:
+  dbnz  c, .entry
+  callf DirNextBlock
+  ld    FsError
+  bnz   .end
+  br    .block
+.return:
   pop   psw
   ret
-label_1FD5:
-  ld    $5C
+.end:
+  ld    FsError
   or    #$80
-  st    $5C
-  br    label_1FD2
-label_1FDD:
+  st    FsError
+  br    .return
+;; -----------------------------------------------------------------------------
+;; FindDataFileByName ($1FDD)
+;; Search the directory for a data file ($33) whose name matches the 12 bytes at
+;; bank 1 $29 (the name received from the other VMU). Out: ACC = $FF found, 0 not.
+;; -----------------------------------------------------------------------------
+FindDataFileByName:
   push  psw
   clr1  psw, rambk0
   mov   #$01, fpr
@@ -3604,99 +4220,109 @@ label_1FDD:
   mov   #$FE, trh
   mov   #$46, trl
   call  PrepareFlashBlockRead
-  st    $54
+  st    FatBank
   ld    trh
-  st    $55
+  st    FatAddrHi
   ld    trl
-  st    $56
+  st    FatAddrLo
   mov   #$FE, trh
   mov   #$4A, trl
   callf PrepareFlashBlockRead
-  ld    $52
-  st    $58
-label_2006:
+  ld    MathHi
+  st    DirBlock
+.block:
   mov   #$10, c
-label_2009:
+.entry:
   ldf
-  be    #$33, label_200F
-  br    label_2014
-label_200F:
-  callf label_2097
-  bz    label_2038
-label_2014:
+  be    #$33, .compare
+  br    .next
+.compare:
+  callf CompareFileName
+  bz    .found
+.next:
   ld    trl
   add   #$20
   st    trl
   ld    trh
   addc  #$00
   st    trh
-  dbnz  c, label_2009
-  callf label_2043
-  ld    $5C
-  bnz   label_202C
-  br    label_2006
-label_202C:
-  ld    $5C
+  dbnz  c, .entry
+  callf DirNextBlock
+  ld    FsError
+  bnz   .notFound
+  br    .block
+.notFound:
+  ld    FsError
   and   #$7F
-  st    $5C
+  st    FsError
   mov   #$00, acc
-label_2035:
+.return:
   pop   psw
   ret
-label_2038:
-  ld    $5C
+.found:
+  ld    FsError
   and   #$7F
-  st    $5C
+  st    FsError
   mov   #$FF, acc
-  br    label_2035
-label_2043:
+  br    .return
+;; -----------------------------------------------------------------------------
+;; DirNextBlock ($2043)
+;; Follow the FAT from DirBlock to the next directory block and point TRH:TRL at it.
+;; End of chain ($FFFA) or a bad link sets FsError bit 7.
+;; -----------------------------------------------------------------------------
+DirNextBlock:
   push  psw
   clr1  psw, rambk0
-  ld    $54
+  ld    FatBank
   st    fpr
   st    FlashBankTemp
-  ld    $55
+  ld    FatAddrHi
   st    trh
-  ld    $56
+  ld    FatAddrLo
   st    trl
-  ld    $58
+  ld    DirBlock
   clr1  psw, cy
   rolc
   st    c
   mov   #$00, acc
   rolc
-  st    $52
+  st    MathHi
   ld    trl
   add   c
   st    trl
   ld    trh
-  add   $52
+  add   MathHi
   st    trh
   ldf
-  bne   #$FA, label_207E
+  bne   #$FA, .follow
   inc   trl
   ldf
   dec   trl
-  be    #$FF, label_208F
-  bz    label_207E
-  br    label_208F
-label_207E:
+  be    #$FF, .end
+  bz    .follow
+  br    .end
+.follow:
   inc   trl
   ldf
-  bnz   label_208F
+  bnz   .end
   dec   trl
   callf PrepareFlashBlockRead
-  ld    $52
-  st    $58
-label_208C:
+  ld    MathHi
+  st    DirBlock
+.return:
   pop   psw
   ret
-label_208F:
-  ld    $5C
+.end:
+  ld    FsError
   or    #$80
-  st    $5C
-  br    label_208C
-label_2097:
+  st    FsError
+  br    .return
+;; -----------------------------------------------------------------------------
+;; CompareFileName ($2097)
+;; Compare the name of the entry at TRH:TRL (+4, 12 bytes) with bank 1 $29..$34.
+;; Out: ACC = 0 if equal.
+;; -----------------------------------------------------------------------------
+CompareFileName:
   push  psw
   set1  psw, rambk0
   push  trh
@@ -3708,14 +4334,14 @@ label_2097:
   st    trl
   mov   #$29, $00
   mov   #$0C, b
-label_20AF:
+.loop:
   ldf
   xor   @R0
   inc   $00
   inc   trl
-  bnz   label_20BA
-  dbnz  b, label_20AF
-label_20BA:
+  bnz   .return
+  dbnz  b, .loop
+.return:
   pop   $00
   pop   b
   pop   trl
@@ -3723,146 +4349,183 @@ label_20BA:
   pop   psw
   ret
 
+Str_FreeGame:
   .string 11 "Free\r\nGame"
+Str_FileCounter:
   .byte $85  
   .string 20 "   /   \r\r\r\n  /  /  "
 
+Str_SystemError:
   .string 19 "System  \r\n   error"
+Str_NoSavedFiles:
   .string 19 "No saved\r\n   files"
+Str_FileDamaged:
   .string 19 "File is \r\n damaged"
+Str_Copy:
   .byte $EF
   .string 8 "Copy   "
+Str_Delete:
   .byte $EF
   .string 8 "Delete "
+Str_YesHint:
   .byte $1A
   .string 6 ":Yes\r\n"
+Str_NoHint:
   .byte $1B
   .string 5 ":No "
+Str_Yes:
   .string 5 "Yes "
+Str_No:
   .string 5 " No "
+Str_TypeData:
   .string 7 "Data   "
   .byte  $82
   .byte  $00
+Str_TypeGame:
   .string 7 "Game   "
   .byte  $82
   .byte  $00
+Str_TypeOther:
   .string 7 "Other  "
   .byte  $82
   .byte  $00
 
-label_2162:
+;; -----------------------------------------------------------------------------
+;; FileCopy ($2162)
+;; "Copy ?" for the selected file (TRH:TRL = its directory entry). Copy-protected files
+;; get "Unable to copy". On Yes: if another VMU is plugged into the top connector
+;; (P7.3 set, P7.0 clear) start CopySend, otherwise show "Connect VM" with a spinner
+;; until one appears ($FC) or B is pressed.
+;; -----------------------------------------------------------------------------
+FileCopy:
   inc   trl
   ldf
   dec   trl
-  bne   #$FF, label_216C
-  jmp   label_21F3
-label_216C:
-  call  label_263B
+  bne   #$FF, .confirm                  ; copy protect byte = $FF?
+  jmp   FileCopyProtected
+.confirm:
+  call  DrawCopyPrompt
   mov   #$00, c
-  callf label_3675
-  mov   #$01, $33
-  mov   #$00, $35
-label_217A:
-  callf label_3696
-  be    #$FF, label_21F0
-  be    #$FD, label_21F0
-  be    #$20, label_21A3
-  be    #$04, label_2191
-  be    #$08, label_2191
-  be    #$10, label_219F
-  br    label_217A
-label_2191:
+  callf WaitAllButtonsReleased
+  mov   #$01, IdleTicks
+  mov   #$00, SleepCtl
+.confirmLoop:
+  callf WaitKeyEvent
+  be    #$FF, FileCopy_exit
+  be    #$FD, FileCopy_exit
+  be    #$20, .cancel
+  be    #$04, .toggle
+  be    #$08, .toggle
+  be    #$10, .select
+  br    .confirmLoop
+.toggle:
   ld    c
   xor   #$FF
   st    c
-  callf label_1F47
-  callf label_3662
-  br    label_217A
-label_219F:
+  callf DrawYesNoChoice
+  callf WaitDpadReleased
+  br    .confirmLoop
+.select:
   ld    c
-  bnz   label_21A6
-label_21A3:
-  jmpf  label_1AEB
-label_21A6:
-  mov   #$00, SerialTimeout
-  ld    p7
+  bnz   .yes
+.cancel:
+  jmpf  FileActionMenu
+.yes:
+  mov   #$00, HalfSecTicks
+  ld    p7                              ; another VMU connected and no controller?
   and   #$09
-  bne   #$08, label_21B2
-  jmp   label_222C
-label_21B2:
+  bne   #$08, .waitForVmu
+  jmp   CopySend
+.waitForVmu:
   clr1  p3int, $00
-  call  label_26F8
-  mov   #$01, $33
-  mov   #$F0, c
-  mov   #$01, $2B
-label_21BF:
-  callf label_36D8
-  be    #$FF, label_21F0
-  be    #$FD, label_21F0
-  be    #$FC, label_21EB
-  be    #$20, label_21A3
+  call  DrawConnectVmu
+  mov   #$01, IdleTicks
+  mov   #$F0, c                         ; spinner: font characters $F0-$F7
+  mov   #$01, CopyRxArm
+.spinLoop:
+  callf WaitKeyEventSlow
+  be    #$FF, FileCopy_exit
+  be    #$FD, FileCopy_exit
+  be    #$FC, .connected
+  be    #$20, .cancel
   ld    c
   and   #$FC
-  be    #$F4, label_21DE
+  be    #$F4, .drawSpinner
   ld    c
-  bne   #$F8, label_21DE
+  bne   #$F8, .drawSpinner
   and   #$F0
   st    c
-label_21DE:
-  mov   #$07, $60
-  mov   #$03, $61
-  callf label_37D2
+.drawSpinner:
+  mov   #$07, CursorX
+  mov   #$03, CursorY
+  callf DrawChar6x8
   inc   c
-  br    label_21BF
-label_21EB:
-  mov   #$FF, $2B
-  jmp   label_2162
-label_21F0:
-  jmpf  label_1B68
-label_21F3:
+  br    .spinLoop
+.connected:
+  mov   #$FF, CopyRxArm
+  jmp   FileCopy
+FileCopy_exit:
+  jmpf  FileManagerExit
+;; -----------------------------------------------------------------------------
+;; FileCopyProtected ($21F3)
+;; "Unable to copy" until B / Left.
+;; -----------------------------------------------------------------------------
+FileCopyProtected:
   push  trh
   push  trl
   clr1  p3int, $00
   mov   #$01, xbnk
-  callf label_3BCD
-  mov   #$88, trl
-  mov   #$27, trh      ; Read string "Unable to copy"
-  mov   #$00, $60
-  mov   #$00, $61
+  callf ClearHalfScreen
+  mov   #<Str_UnableToCopy, trl
+  mov   #>Str_UnableToCopy, trh
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   callf DrawString
   pop   trl
   pop   trh
-  callf label_3675
-  mov   #$01, $33
-label_2218:
-  callf label_3696
-  be    #$FF, label_21F0
-  be    #$FD, label_21F0
-  be    #$20, label_2229
-  be    #$04, label_2229
-  br    label_2218
-label_2229:
-  jmpf  label_1AEB
-label_222C:
-  mov   #$81, ocr
-  mov   #$FF, $2B
+  callf WaitAllButtonsReleased
+  mov   #$01, IdleTicks
+.loop:
+  callf WaitKeyEvent
+  be    #$FF, FileCopy_exit
+  be    #$FD, FileCopy_exit
+  be    #$20, .back
+  be    #$04, .back
+  br    .loop
+.back:
+  jmpf  FileActionMenu
+;; -----------------------------------------------------------------------------
+;; CopySend ($222C)
+;; Send the selected file over SIO to the other VMU. Packet sequence (the receiver
+;; acks every header with $0C, see CheckPeerReadyToReceiveMessage):
+;;   [$11 $02 type size $FF]     file info
+;;   [$1B $06 name(12) $FF]      file name
+;;   per 128-byte page: [$5x $04 data(128)] then [$10 $08 $00 $FF]
+;;   [$1B $03 entry+$10..$1B $FF] timestamp, size, header offset
+;;   [$10 $08 $00 $FF]            done
+;; A $0A answer to the name packet means the receiver already has a file with that
+;; name; a $0A after the info packet means it has no room.
+;; -----------------------------------------------------------------------------
+CopySend:
+  mov   #$81, ocr                       ; OCR $81: run from the RC oscillator
+  mov   #$FF, CopyRxArm
   call  InitializeSerialIO
-  mov   #$00, $60
-  mov   #$02, $61
-  clr1  p3int, $00
+  mov   #$00, CursorX
+  mov   #$02, CursorY
+  clr1  p3int, $00                      ; "Copying!" on row 2
   mov   #$01, xbnk
-  callf label_3BCD
+  callf ClearHalfScreen
   push  trh
   push  trl
-  mov   #$1F, trl
-  mov   #$27, trh     ; Read string "Copying!"
+  mov   #<Str_Copying, trl
+  mov   #>Str_Copying, trh
   callf DrawString
   pop   trl
   pop   trh
-  mov   #$00, sbuf1
+  mov   #$00, sbuf1                     ; bank 1 $10.. = DataToTransmit, $28.. = DataTransmitted
   set1  psw, rambk0
-  mov   #$10, $00
-  mov   #$28, $01
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   mov   #$11, @R0
   inc   $00
   mov   #$02, @R0
@@ -3877,21 +4540,21 @@ label_222C:
   ldf                 ; Read file block count (Directory 0x18)
   pop   trl
   st    @R0
-  st    $24
+  st    CopyBlocksLeft                  ; CopyBlocksLeft = file size in blocks
   inc   $00
   mov   #$FF, @R0
   mov   #$04, b       ; Number of bytes to send
-  mov   #$10, $00
-  mov   #$28, $01
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   call  SerialTxMultiple
   bnz   FailTransfer
   call  VerifyDataPostTx
   bnz   FailTransfer
   call  CheckPeerReadyToReceiveMessage
-  bne   #$0A, label_2294
-  jmp   label_2332
-label_2294:
-  mov   #$10, $00
+  bne   #$0A, .sendName                 ; $0A after the info packet: no room on the other side
+  jmp   CopyFailNoRoom
+.sendName:
+  mov   #DataToTransmit, $00
   mov   #$1B, @R0
   inc   $00
   mov   #$06, @R0
@@ -3902,49 +4565,54 @@ label_2294:
   add   #$04
   st    trl
   mov   #$0C, b
-label_22AC:
+.loop:
   ldf
   st    @R0
   inc   trl
   inc   $00
-  dbnz  b, label_22AC
+  dbnz  b, .loop
   pop   trl
   pop   trh
   mov   #$FF, @R0
   mov   #$0E, b
-  mov   #$10, $00
-  mov   #$28, $01
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   call  SerialTxMultiple
   bnz   FailTransfer
   call  VerifyDataPostTx
   bnz   FailTransfer
   call  CheckPeerReadyToReceiveMessage
-  set1  scon1, $01
-  be    #$0A, label_2338
-  call  label_233E
+  set1  scon1, $01                      ; keep receiving
+  be    #$0A, CopyFailSameFile          ; $0A after the name: same file exists
+  call  CopySendFileBlocks
   bnz   FailTransfer
-  call  label_2426
+  call  CopySendDirTail
   bnz   FailTransfer
   clr1  psw, rambk0
-  call  label_2688
-label_22DF:
-  call  label_25C3
+  call  DrawCopied
+;; -----------------------------------------------------------------------------
+;; CopyFinished ($22DF)
+;; Restore P1/SIO, back to the quartz clock, and wait for A before returning to the
+;; file manager. Also reached after a failure or "Not enough memory".
+;; -----------------------------------------------------------------------------
+CopyFinished:
+  call  SerialRestorePorts
   mov   #$A3, ocr
-  callf label_3675
-  mov   #$01, $33
-  mov   #$00, $35
-  mov   #$00, $30
-label_22F0:
-  callf label_3696
-  be    #$FF, label_22FE
-  be    #$FD, label_22FE
-  be    #$10, label_2301
-  br    label_22F0
-label_22FE:
-  jmpf  label_1B68
-label_2301:
-  mov   #$00, $2B
-  jmpf  label_196F
+  callf WaitAllButtonsReleased
+  mov   #$01, IdleTicks
+  mov   #$00, SleepCtl
+  mov   #$00, BiosMode
+.waitA:
+  callf WaitKeyEvent
+  be    #$FF, .exit
+  be    #$FD, .exit
+  be    #$10, .restart
+  br    .waitA
+.exit:
+  jmpf  FileManagerExit
+.restart:
+  mov   #$00, CopyRxArm
+  jmpf  FileManager
 
 .org $2307
 FailTransfer:
@@ -3969,16 +4637,22 @@ FailTransfer:
 .Fail:
   clr1  psw, rambk0
   call  IndicateCopyFailed  ; Display failure message on the local VMU
-  br    label_22DF
-label_2332:
+  br    CopyFinished
+CopyFailNoRoom:
   clr1  psw, rambk0
-  call  label_26C0
-  br    label_22DF
-label_2338:
+  call  DrawNotEnoughMemory
+  br    CopyFinished
+CopyFailSameFile:
   clr1  psw, rambk0
-  call  label_26DC
-  br    label_22DF
-label_233E:
+  call  DrawSameFileExists
+  br    CopyFinished
+;; -----------------------------------------------------------------------------
+;; CopySendFileBlocks ($233E)
+;; Walk the file's FAT chain (CopyBlocksLeft blocks) and send every block as four
+;; 128-byte pages (CopySendPage), each followed by a [$10 $08 $00 $FF] packet.
+;; Out: ACC = 0 ok, $FF on any transfer error.
+;; -----------------------------------------------------------------------------
+CopySendFileBlocks:
   push  b
   push  c
   clr1  psw, rambk0
@@ -4010,22 +4684,22 @@ label_233E:
   ld    trl
   add   #$02
   st    trl
-label_2381:
+.block:
   clr1  psw, rambk0
   callf PrepareFlashBlockRead
   set1  psw, rambk0
-  st    $7D
+  st    FmBank
   ld    trh
-  st    $7E
+  st    FmAddrHi
   ld    trl
-  st    $7F
+  st    FmAddrLo
   mov   #$04, c
-label_2395:
+.page:
   push  c
-  call  label_24AB
-  bnz   label_240E
-  callf label_E01B
-  mov   #$10, $00
+  call  CopySendPage
+  bnz   .fail
+  callf FlashVerifyEntry                ; FM_VRF (result unused)
+  mov   #DataToTransmit, $00
   mov   #$10, @R0
   inc   $00
   mov   #$08, @R0
@@ -4035,37 +4709,37 @@ label_2395:
   mov   #$FF, @R0
   mov   #$03, b
   call  CheckPeerReadyToReceiveMessage
-  be    #$0A, label_240E
-  mov   #$10, $00
-  mov   #$28, $01
+  be    #$0A, .fail
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   call  SerialTxMultiple
-  bnz   label_240E
+  bnz   .fail
   call  VerifyDataPostTx
-  bnz   label_240E
-  ld    $7F
+  bnz   .fail
+  ld    FmAddrLo                        ; next 128 bytes
   add   #$80
-  st    $7F
+  st    FmAddrLo
   mov   #$00, acc
-  addc  $7E
-  st    $7E
+  addc  FmAddrHi
+  st    FmAddrHi
   pop   c
-  dbnz  c, label_2395
-  ld    $54
+  dbnz  c, .page
+  ld    $54                             ; FAT entry of this block -> next block number
   st    fpr
   clr1  psw, rambk0
   st    FlashBankTemp
   set1  psw, rambk0
-  ld    $7D
+  ld    FmBank
   and   #$01
   add   $55
   st    trh
-  ld    $7E
+  ld    FmAddrHi
   and   #$FE
   add   $56
   dec   acc
   dec   acc
   st    trl
-  dbnz  $24, label_2381
+  dbnz  CopyBlocksLeft, .block
   pop   trl
   pop   trh
   clr1  psw, rambk0
@@ -4077,7 +4751,7 @@ label_2395:
   pop   b
   mov   #$00, acc
   ret
-label_240E:
+.fail:
   pop   c
   pop   trl
   pop   trh
@@ -4090,14 +4764,19 @@ label_240E:
   pop   b
   mov   #$FF, acc
   ret
-label_2426:
+;; -----------------------------------------------------------------------------
+;; CopySendDirTail ($2426)
+;; Send [$1B $03 entry+$10..$1B $FF] (timestamp, size, header offset) and the final
+;; [$10 $08 $00 $FF]. Out: ACC = 0 ok, $FF on error.
+;; -----------------------------------------------------------------------------
+CopySendDirTail:
   push  b
   clr1  psw, rambk0
   push  FlashBankTemp
   set1  psw, rambk0
   push  trh
   push  trl
-  mov   #$10, $00
+  mov   #DataToTransmit, $00
   mov   #$1B, @R0
   inc   $00
   mov   #$03, @R0
@@ -4106,23 +4785,23 @@ label_2426:
   add   #$10
   st    trl
   mov   #$0C, b
-label_2446:
+.loop:
   ldf
   st    @R0
   inc   trl
   inc   $00
-  dbnz  b, label_2446
+  dbnz  b, .loop
   mov   #$FF, @R0
   mov   #$0E, b
   call  CheckPeerReadyToReceiveMessage
-  be    #$0A, label_24A6
-  mov   #$10, $00
-  mov   #$28, $01
+  be    #$0A, .fail
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   call  SerialTxMultiple
-  bnz   label_24A6
+  bnz   .fail
   call  VerifyDataPostTx
-  bnz   label_24A6
-  mov   #$10, $00
+  bnz   .fail
+  mov   #DataToTransmit, $00
   mov   #$10, @R0
   inc   $00
   mov   #$08, @R0
@@ -4132,15 +4811,15 @@ label_2446:
   mov   #$FF, @R0
   mov   #$03, b
   call  CheckPeerReadyToReceiveMessage
-  be    #$0A, label_24A6
-  mov   #$10, $00
-  mov   #$28, $01
+  be    #$0A, .fail
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   call  SerialTxMultiple
-  bnz   label_24A6
+  bnz   .fail
   call  VerifyDataPostTx
-  bnz   label_24A6
+  bnz   .fail
   mov   #$00, acc
-label_2491:
+.return:
   pop   trl
   pop   trh
   clr1  psw, rambk0
@@ -4152,36 +4831,42 @@ label_2491:
   set1  psw, rambk0
   pop   b
   ret
-label_24A6:
+.fail:
   mov   #$FF, acc
-  br    label_2491
-label_24AB:
-  callf label_E027
-  push  $7D
-  push  $7E
-  push  $7F
-  mov   #$7E, $00
+  br    .return
+;; -----------------------------------------------------------------------------
+;; CopySendPage ($24AB)
+;; FM_PRD the 128 bytes at FmBank/FmAddrHi/FmAddrLo into bank 1 $80-$FF and send it as
+;; [$50 $04 data] from $7E (the two header bytes overwrite FmAddrHi/FmAddrLo, which are
+;; saved and restored around the send). Out: ACC = 0 ok.
+;; -----------------------------------------------------------------------------
+CopySendPage:
+  callf FlashReadEntry
+  push  FmBank
+  push  FmAddrHi
+  push  FmAddrLo
+  mov   #FmAddrHi, $00
   mov   #$50, @R0
   inc   $00
   mov   #$04, @R0
   mov   #$82, b
   call  CheckPeerReadyToReceiveMessage
-  be    #$0A, label_24DD
-  mov   #$7E, $00
-  mov   #$7E, $01
+  be    #$0A, .fail
+  mov   #FmAddrHi, $00
+  mov   #FmAddrHi, $01
   call  SerialTxMultiple
-  bnz   label_24DD
-  call  label_2560
-  bnz   label_24DD
+  bnz   .fail
+  call  CheckDataPacketEcho
+  bnz   .fail
   mov   #$00, acc
-label_24D6:
-  pop   $7F
-  pop   $7E
-  pop   $7D
+.return:
+  pop   FmAddrLo
+  pop   FmAddrHi
+  pop   FmBank
   ret
-label_24DD:
+.fail:
   mov   #$FF, acc
-  br    label_24D6
+  br    .return
 
 ;; PRE:
 ;; b: number of bytes to send
@@ -4197,7 +4882,7 @@ label_24DD:
 SerialTxMultiple:
   mov   #$01, NBytesToSend
   clr1  psw, rambk0
-  mov   #$00, SerialTimeout     ; Reset SerialTimeout to 0
+  mov   #$00, HalfSecTicks     ; Reset HalfSecTicks to 0
   set1  psw, rambk0
   set1  scon1, $03              ; Begin receiving
   call  SerialTxOneByte         ; Send the first byte in @R0
@@ -4205,10 +4890,10 @@ SerialTxMultiple:
   set1  pcon, $00               ; Enter halt mode
   push  psw
   clr1  psw, rambk0
-  ld    SerialTimeout           ; Check serial timeout
+  ld    HalfSecTicks           ; Check serial timeout
   pop   psw
   be    #$06, .ErrReturn
-  bn    psw, cy, .ErrReturn     ; Fail if SerialTimeout >= 6
+  bn    psw, cy, .ErrReturn     ; Fail if HalfSecTicks >= 6
   ld    p7                      ; Check if other VMU connected
   and   #$09
   bne   #$08, .ErrReturn        ; Fail if other VMU not connected
@@ -4227,15 +4912,15 @@ SerialTxMultiple:
   call  SerialTxOneByte         ; Send the next byte
   inc   $00                     ; Inc tx data pointer
   clr1  psw, rambk0
-  mov   #$00, SerialTimeout     ; Reset serial timeout
+  mov   #$00, HalfSecTicks     ; Reset serial timeout
   set1  psw, rambk0
 .WaitToSendNextByte:
   set1  pcon, $00
   clr1  psw, rambk0
-  ld    SerialTimeout           ; Check serial timeout
+  ld    HalfSecTicks           ; Check serial timeout
   set1  psw, rambk0
   be    #$06, .ErrReturn
-  bn    psw, cy, .ErrReturn     ; Fail if SerialTimeout >= 6
+  bn    psw, cy, .ErrReturn     ; Fail if HalfSecTicks >= 6
   ld    p7                      ; Check if other VMU connected
   and   #$09
   bne   #$08, .ErrReturn        ; Fail if other VMU not connected
@@ -4258,8 +4943,8 @@ SerialTxMultiple:
 ;; is the same as the data we actually transmitted (stored at $28)
 .org $254E
 VerifyDataPostTx:
-  mov   #$10, $00
-  mov   #$28, $01
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
 .VerifyOneByte:
   ld    @R0
   xor   @R1
@@ -4270,18 +4955,22 @@ VerifyDataPostTx:
 .End:
   ret
 
-label_2560:
-  mov   #$7E, $00
+;; -----------------------------------------------------------------------------
+;; CheckDataPacketEcho ($2560)
+;; After a data packet: the first two bytes looped back must still be $50 $04.
+;; -----------------------------------------------------------------------------
+CheckDataPacketEcho:
+  mov   #FmAddrHi, $00
   mov   #$50, acc
   xor   @R0
-  bnz   label_2575
+  bnz   .fail
   mov   #$04, acc
   inc   $00
   xor   @R0
-  bnz   label_2575
+  bnz   .fail
   mov   #$00, acc
   ret
-label_2575:
+.fail:
   mov   #$FF, acc
   ret
 
@@ -4292,9 +4981,9 @@ label_2575:
 CheckPeerReadyToReceiveMessage:
   push  psw
   clr1  psw, rambk0             ; Use ram bank 0
-  mov   #$00, SerialTimeout
+  mov   #$00, HalfSecTicks
 .Wait:
-  ld    SerialTimeout
+  ld    HalfSecTicks
   be    #$06, .Fail
   bn    psw, cy, .Fail          ; Fail if !(timeout < 6)
   bn    scon1, $01, .Wait       ; Keep waiting if receive end flag not set
@@ -4329,15 +5018,20 @@ InitializeSerialIO:
   mov   #$00, sbuf0
   mov   #$04, scon1   ; Use MSB first receive order
   mov   #$00, sbuf1
-  mov   #$FF, $6E
+  mov   #$FF, BatteryCheck
   ret
 
-label_25C3:
+;; -----------------------------------------------------------------------------
+;; SerialRestorePorts ($25C3)
+;; Undo InitializeSerialIO: P1 back to its idle configuration, IP = 0, re-enable the
+;; automatic battery check.
+;; -----------------------------------------------------------------------------
+SerialRestorePorts:
   mov   #$40, p1
   mov   #$80, p1ddr
   mov   #$BF, p1fcr
   mov   #$00, ip
-  mov   #$00, $6E
+  mov   #$00, BatteryCheck
   ret
 
 ;; PRE:
@@ -4385,7 +5079,12 @@ HandleIntSIO0:
   pop   acc
   ret
 
-label_260E:
+;; -----------------------------------------------------------------------------
+;; IsrSio1 ($260E)
+;; SIO1 (receive) interrupt: store SBUF1 at bank 1 @R1++, re-arm, and stop receiving
+;; (SCON1 = $04) when NBytesToReceive reaches 0.
+;; -----------------------------------------------------------------------------
+IsrSio1:
   push  acc
   clr1  scon1, $01
   ld    sbuf1
@@ -4394,63 +5093,76 @@ label_260E:
   set1  psw, rambk0
   st    @R1
   inc   $01
-  dbnz  NBytesToReceive, label_2623
+  dbnz  NBytesToReceive, .return
   mov   #$04, scon1
-label_2623:
+.return:
   pop   psw
   pop   acc
   ret
-label_2628:
+;; -----------------------------------------------------------------------------
+;; SwitchToCfClock ($2628)
+;; Start the ceramic (CF) oscillator while still running from RC (OCR $80), give it
+;; ~100 loops to settle, then run from it: OCR = $12 (CF, 1/12, RC stopped).
+;; -----------------------------------------------------------------------------
+SwitchToCfClock:
   mov   #$81, ocr
   ld    ocr
   and   #$FC
   st    ocr
   mov   #$64, acc
-label_2634:
-  dbnz  acc, label_2634
+.delay:
+  dbnz  acc, .delay
   mov   #$12, ocr
   ret
-label_263B:
+;; -----------------------------------------------------------------------------
+;; DrawCopyPrompt ($263B)
+;; File name on rows 0-1, "Copy ?" on row 2 and the Yes/No choice (No highlighted).
+;; -----------------------------------------------------------------------------
+DrawCopyPrompt:
   push  trh
   push  trl
   clr1  p3int, $00
-  callf label_3C07
-  mov   #$00, $60
-  mov   #$00, $61
+  callf ClearScreen
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   ld    trl
   add   #$04
   st    trl
   mov   #$08, c
   mov   #$02, b
-label_2656:
+.loop:
   ldf
-  callf label_37D2
+  callf DrawChar6x8
   inc   trl
-  inc   $60
-  dbnz  c, label_2656
-  inc   $61
-  mov   #$00, $60
+  inc   CursorX
+  dbnz  c, .loop
+  inc   CursorY
+  mov   #$00, CursorX
   mov   #$04, c
-  dbnz  b, label_2656
-  mov   #$16, trl
-  mov   #$27, trh   ; Load string "Copy ?"
-  mov   #$00, $60
-  mov   #$02, $61
+  dbnz  b, .loop
+  mov   #<Str_CopyPrompt, trl
+  mov   #>Str_CopyPrompt, trh
+  mov   #$00, CursorX
+  mov   #$02, CursorY
   callf DrawString
   mov   #$00, acc
-  callf label_1F47
+  callf DrawYesNoChoice
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_2688:
+;; -----------------------------------------------------------------------------
+;; DrawCopied ($2688)
+;; "Copied" on row 2.
+;; -----------------------------------------------------------------------------
+DrawCopied:
   push  trh
   push  trl
   clr1  p3int, $00
-  mov   #$00, $60
-  mov   #$02, $61   ; Load string "Copied  "
-  mov   #$28, trl
-  mov   #$27, trh
+  mov   #$00, CursorX
+  mov   #$02, CursorY   ; Load string "Copied  "
+  mov   #<Str_Copied, trl
+  mov   #>Str_Copied, trh
   callf DrawString
   set1  p3int, $00
   pop   trl
@@ -4462,420 +5174,486 @@ IndicateCopyFailed:
   push  trh
   push  trl
   clr1  p3int, $00  ; Disable P3 interrupt
-  mov   #$00, $60
-  mov   #$02, $61
-  mov   #$31, trl
-  mov   #$27, trh   ; Load string "Copy failed"
+  mov   #$00, CursorX
+  mov   #$02, CursorY
+  mov   #<Str_CopyFailed, trl
+  mov   #>Str_CopyFailed, trh
   callf DrawString
   set1  p3int, $00  ; Enable P3 interrupt
   pop   trl
   pop   trh
   ret
 
-label_26C0:
+DrawNotEnoughMemory:
   push  trh
   push  trl
   clr1  p3int, $00
-  mov   #$00, $60
-  mov   #$00, $61
-  mov   #$44, trl
-  mov   #$27, trh   ; Load string "Not enough free memory"
+  mov   #$00, CursorX
+  mov   #$00, CursorY
+  mov   #<Str_NotEnoughMemory, trl
+  mov   #>Str_NotEnoughMemory, trh
   callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_26DC:
+DrawSameFileExists:
   push  trh
   push  trl
   clr1  p3int, $00
-  mov   #$00, $60
-  mov   #$01, $61
-  mov   #$6B, trl
-  mov   #$27, trh   ; Load string "Same file exists"
+  mov   #$00, CursorX
+  mov   #$01, CursorY
+  mov   #<Str_SameFileExists, trl
+  mov   #>Str_SameFileExists, trh
   callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_26F8:
+;; -----------------------------------------------------------------------------
+;; DrawConnectVmu ($26F8)
+;; Clear the bottom half and draw "Connect VM" (the spinner supplies the "U").
+;; -----------------------------------------------------------------------------
+DrawConnectVmu:
   push  trh
   push  trl
   mov   #$01, xbnk
-  callf label_3BCD
-  mov   #$9B, trl
-  mov   #$27, trh   ; Load string "Connect VM"
-  mov   #$00, $60
-  mov   #$02, $61
+  callf ClearHalfScreen
+  mov   #<Str_ConnectVm, trl
+  mov   #>Str_ConnectVm, trh
+  mov   #$00, CursorX
+  mov   #$02, CursorY
   callf DrawString
   pop   trl
   pop   trh
   ret
 
+Str_CopyPrompt:
   .string 9 "Copy ?  "
+Str_Copying:
   .string 9 "Copying!"
+Str_Copied:
   .string 9 "Copied  "
+Str_CopyFailed:
   .string 19 "Copy    \r\n  failed"
+Str_NotEnoughMemory:
   .string 39 "Not     \r\n enough \r\n  free  \r\n  memory"
+Str_SameFileExists:
   .string 29 "Same    \r\n file   \r\n  exists"
+Str_UnableToCopy:
   .string 19 "Unable  \r\n to copy"
+Str_ConnectVm:
   .string 19 "Connect \r\nVM      "
 
-label_27AE:
+;; -----------------------------------------------------------------------------
+;; CopyReceive ($27AE)
+;; Another VMU was plugged in while browsing files. Show "Waiting for data", count the
+;; free blocks and load the FAT into Maple work RAM (it is used as a 512-byte scratch
+;; copy of the FAT for the whole transfer). Then wait for a header packet ($1x).
+;; A+B together cancels.
+;;   info packet  [$02 type size]: room check (free game blocks for $CC, free user
+;;                blocks otherwise), answer $0A if it doesn't fit
+;;   name packet  [$06 name(12)]: $0A if a data file with that name exists
+;;   data packets: CopyReceiveBlocks writes them straight to newly allocated blocks
+;;   tail packet  [$03 ...]: copied into the new directory entry
+;;   done packet  [$08]: CopyCommitFile writes FAT + directory
+;; -----------------------------------------------------------------------------
+CopyReceive:
   mov   #$81, ocr
-  call  label_2628
+  call  SwitchToCfClock
   call  IndicateWaitingForData
-  callf label_1B6B
+  callf CountFreeUserBlocks
   callf CountFreeGameBlocks
   call  InitializeSerialIO
   mov   #$E0, sbr
   clr1  psw, rambk0
-  mov   #$40, $35
+  mov   #$40, SleepCtl
   set1  psw, rambk0
-  call  label_2F7A
-  mov   #$28, $01
-  mov   #$20, ip
+  call  LoadFatToWram                   ; FAT -> work RAM
+  mov   #DataTransmitted, $01
+  mov   #$20, ip                        ; IP: SIO1 has priority
   mov   #$00, sbuf1
   set1  scon1, $03      ; Start receiving
-label_27D4:
-  callf label_36D8
-  be    #$FD, label_2800
+.waitHeader:
+  callf WaitKeyEventSlow
+  be    #$FD, .modeChanged
   push  psw
   clr1  psw, rambk0
-  ld    $70
+  ld    Buttons_Current                 ; A+B held -> cancel
   pop   psw
-  be    #$30, label_27F9
+  be    #$30, .cancel
   ld    p7              ; Check other VMU still connected
   and   #$09
-  bne   #$08, label_27FE
+  bne   #$08, .abort
   ld    sbuf1
-  bz    label_27D4
+  bz    .waitHeader
   and   #$F0
-  be    #$10, label_2802
+  be    #$10, .gotHeader
   set1  scon1, $03      ; Start receiving
-  br    label_27D4
-label_27F9:
+  br    .waitHeader
+.cancel:
   clr1  psw, rambk0
-  mov   #$FF, $2B
-label_27FE:
+  mov   #$FF, CopyRxArm
+.abort:
   jmp   SerialTeardown
-label_2800:
-  jmp   label_2923
-label_2802:
+.modeChanged:
+  jmp   CopyReceiveCancel
+.gotHeader:
   clr1  p3int, $00
   ld    sbuf1
-  and   #$0F
+  and   #$0F                            ; payload length is in the low nibble
   clr1  scon1, $01
   inc   acc
   inc   acc
-  st    $3F
+  st    RxPayloadSize
   inc   acc
   st    NBytesToReceive
   call  IndicateReceiving
-  mov   #$10, $00
+  mov   #DataToTransmit, $00            ; ack the header byte with $E0
   mov   #$E0, @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
   callf WaitUntilAllBytesSent
   mov   #DataTransmitted, $01
   mov   #$0D, scon1
-label_282A:
+.loop:
   set1  pcon, $00
   ld    p7                    
   and   #$09
-  bne   #$08, label_27FE
+  bne   #$08, .abort
   ld    NBytesToReceive
-  bnz   label_282A
-  mov   #$28, $01
+  bnz   .loop
+  mov   #DataTransmitted, $01
   ld    @R1
-  bne   #$02, label_2862
+  bne   #$02, .reject
   inc   $01
   ld    @R1
   st    $60
   inc   $01
   ld    @R1
-  st    NBlocksToWrite
+  st    NBlocksToWrite                  ; bank 1 $3D = blocks needed, $78/$79 = size for the directory entry
   st    $78
   mov   #$00, $79
   ld    $60
   clr1  psw, rambk0
-  bne   #$CC, label_2858    ; Branch if not a game file
-  ld    NFreeBlocks
-  br    label_285A
-label_2858:
-  ld    $37
-label_285A:
+  bne   #$CC, .dataFile    ; Branch if not a game file
+  ld    FreeGameBlocks
+  br    .checkRoom
+.dataFile:
+  ld    FreeUserBlocks                  ; data file: compare against free user blocks
+.checkRoom:
   set1  psw, rambk0
-  be    NBlocksToWrite, label_286B
-  bn    psw, cy, label_286B
-label_2862:
+  be    NBlocksToWrite, .accepted
+  bn    psw, cy, .accepted
+.reject:
   mov   #$0A, acc
-  call  label_2CB8
+  call  SendStatusByte
   clr1  psw, rambk0
-  jmp   label_27AE
-label_286B:
-  call  label_2CCE
-  call  label_2953
-  bz    label_2873
+  jmp   CopyReceive
+.accepted:
+  call  ProgressBarInit
+  call  RecvAck
+  bz    .expectName
   jmp   SerialTeardown
-label_2873:
-  mov   #$28, $01
+.expectName:
+  mov   #DataTransmitted, $01
   ld    @R1
-  be    #$06, label_287C
-  br    label_2862
-label_287C:
-  call  label_2D02
-  call  label_2A01
+  be    #$06, .gotName
+  br    .reject
+.gotName:
+  call  ProgressBarStep
+  call  CheckNameAndStage
   push  acc
   ld    $60
-  bne   #$CC, label_288D
+  bne   #$CC, .checkUnique              ; game files always start at block 0
   mov   #$00, $62
   mov   #$00, $63
-label_288D:
+.checkUnique:
   pop   acc
-  bz    label_2893
-  br    label_28C3
-label_2893:
-  call  label_295B
-  bnz   label_28D3
-  call  label_2953
-  bz    label_289D
+  bz    .receiveBlocks
+  br    .failed
+.receiveBlocks:
+  call  CopyReceiveBlocks
+  bnz   .failedQuiet
+  call  RecvAck
+  bz    .expectTail
   jmp   SerialTeardown
-label_289D:
-  mov   #$28, $01
+.expectTail:
+  mov   #DataTransmitted, $01
   ld    @R1
-  be    #$03, label_28A6
-  jmp   label_28C3
-label_28A6:
-  call  label_2D02
-  call  label_2A29
-  call  label_2953
-  bz    label_28B0
+  be    #$03, .gotTail
+  jmp   .failed
+.gotTail:
+  call  ProgressBarStep
+  call  StageDirTail
+  call  RecvAck
+  bz    .expectDone
   jmp   SerialTeardown
-label_28B0:
-  mov   #$28, $01
+.expectDone:
+  mov   #DataTransmitted, $01
   ld    @R1
-  be    #$08, label_28B9
-  jmp   label_28C3
-label_28B9:
-  call  label_28E0
-  bnz   label_28C3
-  call  label_2D02
+  be    #$08, .commit
+  jmp   .failed
+.commit:
+  call  CopyCommitFile
+  bnz   .failed
+  call  ProgressBarStep
   clr1  psw, rambk0
-  jmp   label_27AE
-label_28C3:
+  jmp   CopyReceive
+.failed:
   ld    p7
   and   #$09
-  bne   #$08, label_28DE
+  bne   #$08, .disconnected
   mov   #$0A, acc
-  call  label_2CB8
+  call  SendStatusByte
   clr1  psw, rambk0
-  jmp   label_27AE
-label_28D3:
+  jmp   CopyReceive
+.failedQuiet:
   ld    p7
   and   #$09
-  bne   #$08, label_28DE
+  bne   #$08, .disconnected
   clr1  psw, rambk0
-  jmp   label_27AE
-label_28DE:
+  jmp   CopyReceive
+.disconnected:
   jmp   SerialTeardown
-label_28E0:
+;; -----------------------------------------------------------------------------
+;; CopyCommitFile ($28E0)
+;; Write the work-RAM FAT back to flash, then insert the new directory entry (bank 1
+;; $60-$7B) into a free slot and program that page (3 tries; a bad page triggers
+;; RelocateDirBlock). Answers $0C (ok) or $0A (failed) to the sender.
+;; Out: ACC = 0 ok, $FF failed.
+;; -----------------------------------------------------------------------------
+CopyCommitFile:
   clr1  ie, $07
-  call  label_2FCF
+  call  WriteFatFromWram
   clr1  psw, rambk0
-  ld    $5C
+  ld    FsError
   set1  psw, rambk0
-  bz    label_28EE
-  br    label_2918
-label_28EE:
-  call  label_2B1E
-  bnz   label_2918
-  call  label_2BB3
-  bnz   label_2918
+  bz    .insertEntry
+  br    .fail
+.insertEntry:
+  call  FindFreeDirSlot
+  bnz   .fail
+  call  InsertDirEntry
+  bnz   .fail
   mov   #$03, b
-label_28F9:
+.writeDir:
   push  b
-  callf label_E024
+  callf FlashWriteEntry
   pop   b
-  callf label_E01B
-  bz    label_290B
-  dbnz  b, label_28F9
-  callf label_30E8
-label_290B:
+  callf FlashVerifyEntry
+  bz    .ok
+  dbnz  b, .writeDir
+  callf RelocateDirBlock
+.ok:
   set1  ie, $07
   mov   #$0C, acc
-  call  label_2CB8
+  call  SendStatusByte
   clr1  psw, rambk0
   mov   #$00, acc
   ret
-label_2918:
+.fail:
   set1  ie, $07
   mov   #$0A, acc
-  call  label_2CB8
+  call  SendStatusByte
   mov   #$FF, acc
   ret
-label_2923:
+;; -----------------------------------------------------------------------------
+;; CopyReceiveCancel ($2923)
+;; A+B (or MODE) during receive: restore the ports and clock, back to the file manager.
+;; -----------------------------------------------------------------------------
+CopyReceiveCancel:
   clr1  psw, rambk0
   set1  p3int, $00
-  call  label_25C3
+  call  SerialRestorePorts
   mov   #$A3, ocr
-  mov   #$00, $2B
-  mov   #$00, $35
-  mov   #$01, $33
-  jmpf  label_1B68
+  mov   #$00, CopyRxArm
+  mov   #$00, SleepCtl
+  mov   #$01, IdleTicks
+  jmpf  FileManagerExit
 
 .org $2938
 SerialTeardown:
   clr1  psw, rambk0
   set1  p3int, $00
-  call  label_25C3
+  call  SerialRestorePorts
   mov   #$02, xbnk
   mov   #$00, xram_0184 ; clear flash icon
   mov   #$A3, ocr
-  mov   #$01, $33
-  mov   #$00, $35
-  mov   #$00, $30
-  jmpf  label_196F
+  mov   #$01, IdleTicks
+  mov   #$00, SleepCtl
+  mov   #$00, BiosMode
+  jmpf  FileManager
 
-label_2953:
+;; -----------------------------------------------------------------------------
+;; RecvAck ($2953)
+;; Send $0C ("ready") and receive the next packet (RecvPacket).
+;; -----------------------------------------------------------------------------
+RecvAck:
   mov   #$0C, acc
-  call  label_2CB8
-  call  label_2C3C
+  call  SendStatusByte
+  call  RecvPacket
   ret
-label_295B:
+;; -----------------------------------------------------------------------------
+;; CopyReceiveBlocks ($295B)
+;; Receive NBlocksToWrite blocks. Game files take consecutive blocks from 0 and only if
+;; the FAT entry at block 0 says $FFFC and the region is free; data files get blocks
+;; allocated from 199 downwards (AllocDataBlock). Out: ACC = 0 ok.
+;; -----------------------------------------------------------------------------
+CopyReceiveBlocks:
   push  b
   push  c
   ld    $60
-  bne   #$CC, label_2991
+  bne   #$CC, .dataNext
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   ld    vtrbf
-  bne   #$FC, label_2973
+  bne   #$FC, .fail
   ld    vtrbf
-  be    #$FF, label_2975
-label_2973:
-  jmp   label_29B2
-label_2975:
+  be    #$FF, .gameStart
+.fail:
+  jmp   CopyReceiveBlocks_fail2
+.gameStart:
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   mov   #$FA, vtrbf
   mov   #$FF, vtrbf
-  mov   #$00, $7D
-  mov   #$00, $7E
-  mov   #$00, $7F
-  br    label_2997
-label_298B:
-  call  label_2AD0
-  bz    label_2997
-  br    label_29B2
-label_2991:
-  call  label_2A3C
-  bz    label_2997
-  br    label_29B2
-label_2997:
-  call  label_29BA
-  bnz   label_29B2
-  call  label_2D02
+  mov   #$00, FmBank                    ; game data starts at flash $00000
+  mov   #$00, FmAddrHi
+  mov   #$00, FmAddrLo
+  br    .receiveBlock
+.gameNext:
+  call  AllocGameBlock
+  bz    .receiveBlock
+  br    CopyReceiveBlocks_fail2
+.dataNext:
+  call  AllocDataBlock
+  bz    .receiveBlock
+  br    CopyReceiveBlocks_fail2
+.receiveBlock:
+  call  ReceiveBlockPages
+  bnz   CopyReceiveBlocks_fail2
+  call  ProgressBarStep
   ld    $60
-  be    #$CC, label_29A7
-  dbnz  NBlocksToWrite, label_2991
-  br    label_29AA
-label_29A7:
-  dbnz  NBlocksToWrite, label_298B
-label_29AA:
+  be    #$CC, .moreGame
+  dbnz  NBlocksToWrite, .dataNext
+  br    .ok
+.moreGame:
+  dbnz  NBlocksToWrite, .gameNext
+.ok:
   mov   #$00, acc
   pop   c
   pop   b
   ret
-label_29B2:
+CopyReceiveBlocks_fail2:
   mov   #$FF, acc
   pop   c
   pop   b
   ret
-label_29BA:
+;; -----------------------------------------------------------------------------
+;; ReceiveBlockPages ($29BA)
+;; Receive the four 128-byte pages of one block and program each one
+;; (WritePageWithRetry). Out: ACC = 0 ok.
+;; -----------------------------------------------------------------------------
+ReceiveBlockPages:
   push  b
   push  c
   mov   #$04, c
-label_29C1:
-  push  $7D
-  push  $7E
-  push  $7F
-  call  label_2953
-  mov   #$7F, $01
+.page:
+  push  FmBank
+  push  FmAddrHi
+  push  FmAddrLo
+  call  RecvAck
+  mov   #FmAddrLo, $01
   ld    @R1
-  be    #$04, label_29D2
-  br    label_29F4
-label_29D2:
-  pop   $7F
-  pop   $7E
-  pop   $7D
-  call  label_2953
-  bnz   label_29F9
-  mov   #$28, $01
+  be    #$04, .gotPage
+  br    .badPage
+.gotPage:
+  pop   FmAddrLo
+  pop   FmAddrHi
+  pop   FmBank
+  call  RecvAck
+  bnz   .fail
+  mov   #DataTransmitted, $01
   ld    @R1
-  be    #$08, label_29E5
-  br    label_29B2
-label_29E5:
-  call  label_2BE8
-  bnz   label_29F4
-  dbnz  c, label_29C1
+  be    #$08, .write
+  br    CopyReceiveBlocks_fail2
+.write:
+  call  WritePageWithRetry
+  bnz   .badPage
+  dbnz  c, .page
   pop   c
   pop   b
   mov   #$00, acc
   ret
-label_29F4:
+.badPage:
   mov   #$0A, acc
-  call  label_2CB8
-label_29F9:
+  call  SendStatusByte
+.fail:
   pop   c
   pop   b
   mov   #$FF, acc
   ret
-label_2A01:
-  callf label_1FDD
-  bnz   label_2A25
+;; -----------------------------------------------------------------------------
+;; CheckNameAndStage ($2A01)
+;; FindDataFileByName; if no clash copy the received name into bank 1 $64 (staging
+;; directory entry) and mark the first block ($62/$63) as not allocated yet ($FFFF).
+;; -----------------------------------------------------------------------------
+CheckNameAndStage:
+  callf FindDataFileByName
+  bnz   .exists
   mov   #$29, $01
   mov   #$64, $00
   mov   #$0C, b
-label_2A0F:
+.copy:
   ld    @R1
   st    @R0
   inc   $01
   inc   $00
-  dbnz  b, label_2A0F
+  dbnz  b, .copy
   mov   #$00, $61
   mov   #$FF, $62
   mov   #$FF, $63
   mov   #$00, acc
   ret
-label_2A25:
+.exists:
   mov   #$FF, acc
   ret
-label_2A29:
+;; -----------------------------------------------------------------------------
+;; StageDirTail ($2A29)
+;; Copy the received tail (timestamp, size, header offset) to bank 1 $70.
+;; -----------------------------------------------------------------------------
+StageDirTail:
   mov   #$29, $01
   mov   #$70, $00
   mov   #$0C, b
-label_2A32:
+.copy:
   ld    @R1
   st    @R0
   inc   $01
   inc   $00
-  dbnz  b, label_2A32
+  dbnz  b, .copy
   ret
-label_2A3C:
+;; -----------------------------------------------------------------------------
+;; AllocDataBlock ($2A3C)
+;; Find the highest free block below 200 in the work-RAM FAT, mark it end-of-chain,
+;; link the previous block to it (or record it as the first block) and set
+;; FmBank/FmAddrHi/FmAddrLo to its flash address. Out: ACC = 0 ok, $FF disk full.
+;; -----------------------------------------------------------------------------
+AllocDataBlock:
   push  c
   mov   #$8E, vrmad1
   set1  vrmad2, $00
   mov   #$C8, c
-label_2A46:
+.scan:
   ld    vtrbf
-  bne   #$FC, label_2A52
+  bne   #$FC, .used
   ld    vtrbf
-  be    #$FF, label_2A67
-  br    label_2A54
-label_2A52:
+  be    #$FF, .found
+  br    .next
+.used:
   ld    vtrbf
-label_2A54:
+.next:
   ld    vrmad1
   sub   #$04
   st    vrmad1
@@ -4883,9 +5661,9 @@ label_2A54:
   subc  #$00
   and   #$01
   st    vrmad2
-  dbnz  c, label_2A46
-  jmp   label_2ACA
-label_2A67:
+  dbnz  c, .scan
+  jmp   .full
+.found:
   ld    vrmad1
   sub   #$02
   st    vrmad1
@@ -4900,17 +5678,17 @@ label_2A67:
   st    $44
   mov   #$00, $45
   ld    $62
-  bne   #$FF, label_2A96
+  bne   #$FF, .link
   ld    $63
-  be    #$FF, label_2A8C
-  jmp   label_2ACA
-label_2A8C:
+  be    #$FF, .first
+  jmp   .full
+.first:
   ld    $44
   st    $62
   ld    $45
   st    $63
-  br    label_2AA6
-label_2A96:
+  br    .setAddress
+.link:
   ld    $70
   st    vrmad2
   ld    $71
@@ -4919,44 +5697,49 @@ label_2A96:
   st    vtrbf
   ld    $45
   st    vtrbf
-label_2AA6:
+.setAddress:
   ld    $44
   clr1  psw, cy
   rolc
   st    $71
-  st    $7E
+  st    FmAddrHi
   st    vrmad1
   mov   #$00, acc
   rolc
   st    $70
-  st    $7D
+  st    FmBank
   st    vrmad2
-  mov   #$00, $7F
+  mov   #$00, FmAddrLo
   mov   #$FA, vtrbf
   mov   #$FF, vtrbf
   pop   c
   mov   #$00, acc
   ret
-label_2ACA:
+.full:
   pop   c
   mov   #$FF, acc
   ret
-label_2AD0:
+;; -----------------------------------------------------------------------------
+;; AllocGameBlock ($2AD0)
+;; Claim the next consecutive block for a game file (must be free), link it from the
+;; previous one and set FmBank/FmAddrHi/FmAddrLo. Out: ACC = 0 ok.
+;; -----------------------------------------------------------------------------
+AllocGameBlock:
   push  b
   ld    vtrbf
-  bne   #$FC, label_2B18
+  bne   #$FC, .fail
   ld    vtrbf
-  bne   #$FF, label_2B18
+  bne   #$FF, .fail
   ld    vrmad1
   sub   #$02
   st    vrmad1
-  st    $7E
+  st    FmAddrHi
   ld    vrmad2
   subc  #$00
   and   #$01
   st    vrmad2
-  st    $7D
-  mov   #$00, $7F
+  st    FmBank
+  mov   #$00, FmAddrLo
   clr1  psw, cy
   rorc
   ld    vrmad1
@@ -4976,11 +5759,17 @@ label_2AD0:
   pop   b
   mov   #$00, acc
   ret
-label_2B18:
+.fail:
   pop   b
   mov   #$FF, acc
   ret
-label_2B1E:
+;; -----------------------------------------------------------------------------
+;; FindFreeDirSlot ($2B1E)
+;; Find the directory page (128 bytes, 4 entries) holding the first empty entry,
+;; following the directory chain through the work-RAM FAT, and FM_PRD it into bank 1
+;; $80-$FF. Out: ACC = 0 ok, $FF directory full/broken.
+;; -----------------------------------------------------------------------------
+FindFreeDirSlot:
   mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, FlashBankTemp
@@ -5000,18 +5789,18 @@ label_2B1E:
   mov   #$4A, trl
   callf PrepareFlashBlockRead
   set1  psw, rambk0
-label_2B4E:
+.block:
   mov   #$10, b
-label_2B51:
+.entry:
   ldf
-  bz    label_2B92
+  bz    .found
   ld    trl
   add   #$20
   st    trl
   mov   #$00, acc
   addc  trh
   st    trh
-  dbnz  b, label_2B51
+  dbnz  b, .entry
   ld    trh
   and   #$FE
   st    vrmad1
@@ -5020,60 +5809,65 @@ label_2B51:
   set1  psw, rambk0
   st    vrmad2
   ld    vtrbf
-  bne   #$FA, label_2B7D
+  bne   #$FA, .checkLink
   ld    vtrbf
-  bnz   label_2BAF
-  br    label_2B81
-label_2B7D:
+  bnz   .fail
+  br    .nextBlock
+.checkLink:
   ld    vtrbf
-  bnz   label_2BAF
-label_2B81:
+  bnz   .fail
+.nextBlock:
   ld    vrmad1
   sub   #$02
-  st    $7E
+  st    FmAddrHi
   ld    vrmad2
   subc  #$00
-  st    $7D
-  mov   #$00, $7F
-  br    label_2B4E
-label_2B92:
+  st    FmBank
+  mov   #$00, FmAddrLo
+  br    .block
+.found:
   push  trl
   ld    trl
   and   #$80
-  st    $7F
+  st    FmAddrLo
   ld    trh
-  st    $7E
+  st    FmAddrHi
   clr1  psw, rambk0
   ld    FlashBankTemp
   set1  psw, rambk0
-  st    $7D
-  callf label_E027
+  st    FmBank
+  callf FlashReadEntry
   pop   trl
   mov   #$00, acc
   ret
-label_2BAF:
+.fail:
   mov   #$FF, acc
   ret
-label_2BB3:
+;; -----------------------------------------------------------------------------
+;; InsertDirEntry ($2BB3)
+;; Copy the staged entry (bank 1 $60-$7B, 28 bytes) into the first empty slot of the
+;; page at bank 1 $80 and zero the last 4 bytes. Out: ACC = 0 ok.
+;; -----------------------------------------------------------------------------
+InsertDirEntry:
   mov   #$04, b
   mov   #$80, $00
-label_2BB9:
+.find:
   ld    @R0
-  bz    label_2BC7
+  bz    .copy
   ld    $00
   add   #$20
   st    $00
-  dbnz  b, label_2BB9
-  br    label_2BE4
-label_2BC7:
+  dbnz  b, .find
+  br    .full
+.copy:
   mov   #$60, $01
   mov   #$1C, b
-label_2BCD:
+.loop:
   ld    @R1
   st    @R0
   inc   $01
   inc   $00
-  dbnz  b, label_2BCD
+  dbnz  b, .loop
   mov   #$00, acc
   st    @R0
   inc   $00
@@ -5083,153 +5877,178 @@ label_2BCD:
   inc   $00
   st    @R0
   ret
-label_2BE4:
+.full:
   mov   #$FF, acc
   ret
-label_2BE8:
+;; -----------------------------------------------------------------------------
+;; WritePageWithRetry ($2BE8)
+;; FM_WRT + FM_VRF the page at FmBank/FmAddrHi/FmAddrLo up to 3 times, then advance
+;; the address by 128. If it never verifies, the block is marked $FFFF (bad) in the
+;; FAT and the FAT is written back. Out: ACC = 0 ok, $FF bad block.
+;; -----------------------------------------------------------------------------
+WritePageWithRetry:
   push  b
   mov   #$03, b
   clr1  ie, $07
-label_2BEF:
+.try:
   push  b
   push  c
-  callf label_E024
+  callf FlashWriteEntry
   pop   c
   pop   b
-  callf label_E01B
-  bz    label_2C04
-  dbnz  b, label_2BEF
-  br    label_2C19
-label_2C04:
-  ld    $7F
+  callf FlashVerifyEntry
+  bz    .ok
+  dbnz  b, .try
+  br    .badBlock
+.ok:
+  ld    FmAddrLo
   add   #$80
-  st    $7F
+  st    FmAddrLo
   mov   #$00, acc
-  addc  $7E
-  st    $7E
+  addc  FmAddrHi
+  st    FmAddrHi
   mov   #$00, acc
-label_2C14:
+.return:
   set1  ie, $07
   pop   b
   ret
-label_2C19:
-  ld    $7D
+.badBlock:
+  ld    FmBank
   and   #$01
   push  acc
-  ld    $7E
+  ld    FmAddrHi
   and   #$FE
   push  acc
-  call  label_2F7A
+  call  LoadFatToWram
   pop   acc
   st    vrmad1
   pop   acc
   st    vrmad2
   mov   #$FF, vtrbf
   mov   #$FF, vtrbf
-  call  label_2FCF
+  call  WriteFatFromWram
   mov   #$FF, acc
-  br    label_2C14
-label_2C3C:
+  br    .return
+;; -----------------------------------------------------------------------------
+;; RecvPacket ($2C3C)
+;; Wait for a header ($1x: length in the low nibble, stored at bank 1 $28) or data
+;; ($5x: 130 bytes from bank 1 $7F) packet, ack its first byte with $E0 and receive
+;; the rest through IsrSio1. Out: ACC = 0 ok, $FF if the other VMU went away.
+;; -----------------------------------------------------------------------------
+RecvPacket:
   set1  pcon, $00
   ld    p7
   and   #$09
-  bne   #$08, label_2C8C
+  bne   #$08, .fail
   ld    sbuf1
-  bz    label_2C3C
+  bz    RecvPacket
   and   #$F0
-  be    #$10, label_2C57
-  bne   #$50, label_2C53
-  jmp   label_2C90
-label_2C53:
+  be    #$10, .header
+  bne   #$50, .ignore
+  jmp   .data
+.ignore:
   set1  scon1, $03
-  br    label_2C3C
-label_2C57:
+  br    RecvPacket
+.header:
   ld    sbuf1
   and   #$0F
   clr1  scon1, $01
   inc   acc
   inc   acc
-  st    $3F
+  st    RxPayloadSize
   inc   acc
   st    NBytesToReceive
-  mov   #$10, $00
+  mov   #DataToTransmit, $00
   mov   #$E0, @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
   callf WaitUntilAllBytesSent
-  mov   #$28, $01
+  mov   #DataTransmitted, $01
   mov   #$0D, scon1
-label_2C7B:
+.waitHeader:
   set1  pcon, $00
   ld    p7
   and   #$09
-  bne   #$08, label_2C8C
+  bne   #$08, .fail
   ld    NBytesToReceive
-  bnz   label_2C7B
+  bnz   .waitHeader
   mov   #$00, acc
   ret
-label_2C8C:
+.fail:
   mov   #$FF, acc
   ret
-label_2C90:
+.data:
   mov   #$82, NBytesToReceive
-  mov   #$81, $3F
-  mov   #$10, $00
+  mov   #$81, RxPayloadSize
+  mov   #DataToTransmit, $00
   mov   #$E0, @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
   callf WaitUntilAllBytesSent
-  mov   #$7F, $01
+  mov   #FmAddrLo, $01
   mov   #$0D, scon1
-label_2CAA:
+.waitData:
   set1  pcon, $00
   ld    p7
   and   #$09
-  bne   #$08, label_2C8C
+  bne   #$08, .fail
   ld    NBytesToReceive
-  bnz   label_2CAA
+  bnz   .waitData
   ret
-label_2CB8:
-  mov   #$10, $00
-  mov   #$28, $01
+;; -----------------------------------------------------------------------------
+;; SendStatusByte ($2CB8)
+;; Send the single byte in ACC ($0C ok/ready, $0A refused) and keep receiving.
+;; -----------------------------------------------------------------------------
+SendStatusByte:
+  mov   #DataToTransmit, $00
+  mov   #DataTransmitted, $01
   st    @R0
   mov   #$01, NBytesToSend
   callf SerialTxOneByte
   callf WaitUntilAllBytesSent
-  mov   #$28, $01
+  mov   #DataTransmitted, $01
   set1  scon1, $03
   ret
-label_2CCE:
+;; -----------------------------------------------------------------------------
+;; ProgressBarInit ($2CCE)
+;; Draw a progress bar on the bottom rows (XRAM bank 1, from $C0), one pixel per block
+;; plus 3.
+;; -----------------------------------------------------------------------------
+ProgressBarInit:
   push  b
   mov   #$01, xbnk
   mov   #$C0, $02
   ld    NBlocksToWrite
   add   #$03
   st    b
-label_2CDC:
+.loop:
   ld    @R2
-  be    #$FF, label_2CE9
+  be    #$FF, .nextByte
   set1  psw, cy
   rorc
   st    @R2
-  dbnz  b, label_2CDC
-  br    label_2CFF
-label_2CE9:
+  dbnz  b, .loop
+  br    .return
+.nextByte:
   inc   $02
   ld    $02
   and   #$0F
-  bne   #$0C, label_2CFA
+  bne   #$0C, .newByte
   ld    $02
   add   #$04
   or    #$C0
   st    $02
-label_2CFA:
+.newByte:
   mov   #$80, @R2
-  dbnz  b, label_2CDC
-label_2CFF:
+  dbnz  b, .loop
+.return:
   pop   b
   ret
-label_2D02:
+;; -----------------------------------------------------------------------------
+;; ProgressBarStep ($2D02)
+;; Remove one pixel from the progress bar.
+;; -----------------------------------------------------------------------------
+ProgressBarStep:
   push  b
   push  acc
   ld    @R2
@@ -5238,32 +6057,41 @@ label_2D02:
   rolc
   and   b
   st    @R2
-  bnz   label_2D22
+  bnz   .return
   dec   $02
   ld    $02
   and   #$0F
-  bne   #$0F, label_2D22
+  bne   #$0F, .return
   ld    $02
   sub   #$04
   or    #$C0
   st    $02
-label_2D22:
+.return:
   pop   acc
   pop   b
   ret
 
-  .byte $23, $00, $FF, $20, $1F, $47, $71, $04, $71, $05, $A0
+;; -----------------------------------------------------------------------------
+;; UnusedTail_2D27 ($2D27)
+;; Unreachable leftover: the tail of some older prompt routine.
+;; -----------------------------------------------------------------------------
+UnusedTail_2D27:
+  mov   #$FF, acc
+  callf DrawYesNoChoice
+  pop   trl
+  pop   trh
+  ret
 
 .org $2D32
 IndicateWaitingForData:
   push  trh
   push  trl
   clr1  p3int, $00
-  callf label_3C07
-  mov   #$00, $60
-  mov   #$00, $61
-  mov   #$6B, trl
-  mov   #$2D, trh   ; Load string "Waiting for data"
+  callf ClearScreen
+  mov   #$00, CursorX
+  mov   #$00, CursorY
+  mov   #<Str_WaitingForData, trl
+  mov   #>Str_WaitingForData, trh
   callf DrawString
   callf DisableFlashIcon
   set1  p3int, $00
@@ -5274,138 +6102,160 @@ IndicateWaitingForData:
 .org $2D54
 IndicateReceiving:
   clr1  psw, rambk0
-  mov   #$00, $60
-  mov   #$00, $61
-  mov   #$88, trl
-  mov   #$2D, trh   ; Load string "Reciving Do Not Unplug"
+  mov   #$00, CursorX
+  mov   #$00, CursorY
+  mov   #<Str_Receiving, trl
+  mov   #>Str_Receiving, trh
   callf DrawString
   callf EnableFlashIcon
   set1  psw, rambk0
   ret
 
 .org $2D6B
+Str_WaitingForData:
   .string 29 "Waiting \r\nfor data\r\n        "
 .org $2D88
+Str_Receiving:
   .string 29 "Reciving\r\n Do Not \r\n  Unplug"
 
-label_2DA5:
-  call  label_2E04
-  callf label_3675
+;; -----------------------------------------------------------------------------
+;; FileDelete ($2DA5)
+;; "Delete ?" for the selected file. On Yes: free its FAT chain, erase its directory
+;; entry (flash icon lit, battery check off meanwhile), select the previous file and
+;; rescan the list.
+;; -----------------------------------------------------------------------------
+FileDelete:
+  call  DrawDeletePrompt
+  callf WaitAllButtonsReleased
   mov   #$00, c
-  mov   #$01, $33
-  mov   #$00, $35
-label_2DB3:
-  callf label_3696
-  be    #$FF, label_2DFF
-  be    #$FD, label_2DFF
-  be    #$10, label_2DCF
-  be    #$20, label_2DCA
-  be    #$04, label_2DD5
-  be    #$08, label_2DD5
-  br    label_2DB3
-label_2DCA:
+  mov   #$01, IdleTicks
+  mov   #$00, SleepCtl
+.loop:
+  callf WaitKeyEvent
+  be    #$FF, .exit
+  be    #$FD, .exit
+  be    #$10, .select
+  be    #$20, .cancel
+  be    #$04, .toggle
+  be    #$08, .toggle
+  br    .loop
+.cancel:
   set1  p3int, $00
-  jmpf  label_1AEB
-label_2DCF:
+  jmpf  FileActionMenu
+.select:
   ld    c
-  bz    label_2DCA
-  br    label_2DE3
-label_2DD5:
+  bz    .cancel
+  br    .yes
+.toggle:
   ld    c
   xor   #$FF
   st    c
-  callf label_1F47
-  callf label_3662
-  br    label_2DB3
-label_2DE3:
-  call  label_2E51
-  mov   #$FF, $6E
+  callf DrawYesNoChoice
+  callf WaitDpadReleased
+  br    .loop
+.yes:
+  call  DrawDeleted
+  mov   #$FF, BatteryCheck
   callf EnableFlashIcon
-  call  label_2ED8
-  call  label_2E73
-  mov   #$00, $6E
+  call  FreeFileBlocks
+  call  EraseDirEntry
+  mov   #$00, BatteryCheck
   callf DisableFlashIcon
-  ld    NBlocksToWrite
-  be    #$01, label_2DFC
-  dec   NBlocksToWrite
-label_2DFC:
-  jmpf  label_1A34
-label_2DFF:
+  ld    SelectedFile
+  be    #$01, .rescan
+  dec   SelectedFile
+.rescan:
+  jmpf  FileListScan
+.exit:
   set1  p3int, $00
-  jmpf  label_1B68
-label_2E04:
+  jmpf  FileManagerExit
+;; -----------------------------------------------------------------------------
+;; DrawDeletePrompt ($2E04)
+;; File name on rows 0-1, "Delete ?" on row 2 and the Yes/No choice (No highlighted).
+;; -----------------------------------------------------------------------------
+DrawDeletePrompt:
   push  trh
   push  trl
   clr1  p3int, $00
-  callf label_3C07
-  mov   #$00, $60
-  mov   #$00, $61
+  callf ClearScreen
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   ld    trl
   add   #$04
   st    trl
   mov   #$08, c
   mov   #$02, b
-label_2E1F:
+.loop:
   ldf
-  callf label_37D2
+  callf DrawChar6x8
   inc   trl
-  inc   $60
-  dbnz  c, label_2E1F
-  inc   $61
-  mov   #$00, $60
+  inc   CursorX
+  dbnz  c, .loop
+  inc   CursorY
+  mov   #$00, CursorX
   mov   #$04, c
-  dbnz  b, label_2E1F
-  mov   #$7D, trl
-  mov   #$33, trh   ; Load string "Delete ?"
-  mov   #$00, $60
-  mov   #$02, $61
+  dbnz  b, .loop
+  mov   #<Str_DeletePrompt, trl
+  mov   #>Str_DeletePrompt, trh
+  mov   #$00, CursorX
+  mov   #$02, CursorY
   callf DrawString
   mov   #$00, acc
-  callf label_1F47
+  callf DrawYesNoChoice
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_2E51:
+;; -----------------------------------------------------------------------------
+;; DrawDeleted ($2E51)
+;; "Deleted" on row 2.
+;; -----------------------------------------------------------------------------
+DrawDeleted:
   push  trh
   push  trl
   clr1  p3int, $00
   mov   #$01, xbnk
-  callf label_3BCD
-  mov   #$86, trl
-  mov   #$33, trh   ; Load string "Deleted "
-  mov   #$00, $60
-  mov   #$02, $61
+  callf ClearHalfScreen
+  mov   #<Str_Deleted, trl
+  mov   #>Str_Deleted, trh
+  mov   #$00, CursorX
+  mov   #$02, CursorY
   callf DrawString
   set1  p3int, $00
   pop   trl
   pop   trh
   ret
-label_2E73:
+;; -----------------------------------------------------------------------------
+;; EraseDirEntry ($2E73)
+;; Zero the 32-byte directory entry at TRH:TRL: FM_PRD its page, clear the entry in
+;; bank 1, FM_WRT + FM_VRF up to 3 times; a page that never verifies goes through
+;; RelocateDirBlock.
+;; -----------------------------------------------------------------------------
+EraseDirEntry:
   mov   #$81, ocr
   clr1  p3int, $00
   set1  psw, rambk0
   clr1  ie, $07
-  mov   #$01, $7D
+  mov   #$01, FmBank
   ld    trh
-  st    $7E
+  st    FmAddrHi
   ld    trl
   and   #$80
-  st    $7F
+  st    FmAddrLo
   push  trh
   push  trl
-  callf label_E027
+  callf FlashReadEntry
   pop   trl
   pop   trh
   mov   #$03, c
-label_2E97:
+.try:
   ld    trl
   and   #$7F
   or    #$80
   st    $00
   mov   #$00, acc
   mov   #$08, b
-label_2EA5:
+.clear:
   st    @R0
   inc   $00
   st    @R0
@@ -5414,32 +6264,37 @@ label_2EA5:
   inc   $00
   st    @R0
   inc   $00
-  dbnz  b, label_2EA5
+  dbnz  b, .clear
   push  trh
   push  trl
   push  c
-  callf label_E024
+  callf FlashWriteEntry
   pop   c
-  callf label_E01B
+  callf FlashVerifyEntry
   pop   trl
   pop   trh
-  bz    label_2ECE
-  dbnz  c, label_2E97
-  callf label_30E8
-label_2ECE:
+  bz    .return
+  dbnz  c, .try
+  callf RelocateDirBlock
+.return:
   set1  ie, $07
   clr1  psw, rambk0
   set1  p3int, $00
   mov   #$A3, ocr
   ret
-label_2ED8:
+;; -----------------------------------------------------------------------------
+;; FreeFileBlocks ($2ED8)
+;; Mark every block of the file at TRH:TRL as free ($FFFC) in the work-RAM FAT, then
+;; write the FAT back (WriteFatFromWram). FsError bit 3 if the chain is broken.
+;; -----------------------------------------------------------------------------
+FreeFileBlocks:
   push  trh
   push  trl
   clr1  p3int, $00
   clr1  ie, $07
   mov   #$81, ocr
   set1  psw, rambk0
-  call  label_2F7A
+  call  LoadFatToWram
   mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, FlashBankTemp
@@ -5448,12 +6303,12 @@ label_2ED8:
   add   trl
   st    trl
   ldf
-  bz    label_2EFE
-  brf   label_2F68
-label_2EFE:
+  bz    .first
+  brf   .badEntry
+.first:
   dec   trl
   ldf
-label_2F01:
+.walk:
   clr1  psw, cy
   rolc
   push  acc
@@ -5463,22 +6318,22 @@ label_2F01:
   push  acc
   st    vrmad2
   ld    vtrbf
-  bne   #$FA, label_2F25
+  bne   #$FA, .link
   ld    vtrbf
   dec   vrmad1
-  bz    label_2F25
-  be    #$FF, label_2F44
+  bz    .link
+  be    #$FF, .last
   pop   acc
   pop   acc
-  brf   label_2F70
-label_2F25:
+  brf   .badChain
+.link:
   st    b
   ld    vtrbf
-  bz    label_2F32
+  bz    .free
   pop   acc
   pop   acc
-  brf   label_2F70
-label_2F32:
+  brf   .badChain
+.free:
   pop   acc
   st    vrmad2
   pop   acc
@@ -5486,8 +6341,8 @@ label_2F32:
   mov   #$FC, vtrbf
   mov   #$FF, vtrbf
   ld    b
-  br    label_2F01
-label_2F44:
+  br    .walk
+.last:
   ld    vtrbf
   pop   acc
   st    vrmad2
@@ -5495,10 +6350,10 @@ label_2F44:
   st    vrmad1
   mov   #$FC, vtrbf
   mov   #$FF, vtrbf
-  call  label_2FCF
+  call  WriteFatFromWram
   ld    $5C
-  bnz   label_2F70
-label_2F5A:
+  bnz   .badChain
+.return:
   mov   #$A3, ocr
   set1  ie, $07
   clr1  psw, rambk0
@@ -5506,18 +6361,23 @@ label_2F5A:
   pop   trl
   pop   trh
   ret
-label_2F68:
+.badEntry:
   clr1  psw, rambk0
-  ld    $5C
+  ld    FsError
   or    #$80
-  st    $5C
-label_2F70:
+  st    FsError
+.badChain:
   clr1  psw, rambk0
-  ld    $5C
+  ld    FsError
   or    #$08
-  st    $5C
-  br    label_2F5A
-label_2F7A:
+  st    FsError
+  br    .return
+;; -----------------------------------------------------------------------------
+;; LoadFatToWram ($2F7A)
+;; Copy the 512-byte FAT block into Maple work RAM ($000-$1FF) via bank 1 $80-$FF,
+;; 128 bytes at a time. Leaves the FAT flash address in bank 1 $54-$56.
+;; -----------------------------------------------------------------------------
+LoadFatToWram:
   push  trh
   push  trl
   push  acc
@@ -5537,43 +6397,50 @@ label_2F7A:
   clr1  vrmad2, $00
   mov   #$00, vrmad1
   mov   #$04, b
-label_2FA7:
+.page:
   clr1  psw, rambk0
   ld    FlashBankTemp
   set1  psw, rambk0
-  st    $7D
+  st    FmBank
   ld    trh
-  st    $7E
+  st    FmAddrHi
   ld    trl
-  st    $7F
-  callf label_E027
-  callf label_358D
+  st    FmAddrLo
+  callf FlashReadEntry
+  callf CopyBufToWram
   ld    trl
-  bnz   label_2FC3
+  bnz   .next
   inc   trh
-label_2FC3:
-  dbnz  b, label_2FA7
+.next:
+  dbnz  b, .page
   pop   b
   pop   acc
   pop   trl
   pop   trh
   ret
-label_2FCF:
+;; -----------------------------------------------------------------------------
+;; WriteFatFromWram ($2FCF)
+;; Write the work-RAM FAT back to flash page by page; pages that already match are
+;; skipped (FM_VRF first). A page that won't program after 3 tries makes
+;; RelocateFatBlock move the FAT elsewhere and starts over. FsError bit 3 if even
+;; that fails.
+;; -----------------------------------------------------------------------------
+WriteFatFromWram:
   clr1  vrmad2, $00
   mov   #$00, vrmad1
   mov   #$04, b
-label_2FD7:
+.page:
   mov   #$03, c
-  callf label_35AF
+  callf CopyWramToBuf
   ld    $54
-  st    $7D
+  st    FmBank
   ld    $55
-  st    $7E
+  st    FmAddrHi
   ld    $56
-  st    $7F
-  callf label_E01B
-  bnz   label_300E
-label_2FEE:
+  st    FmAddrLo
+  callf FlashVerifyEntry
+  bnz   .program
+.next:
   clr1  psw, rambk0
   ld    FlashBankTemp
   set1  psw, rambk0
@@ -5587,33 +6454,39 @@ label_2FEE:
   addc  trh
   st    $55
   st    trh
-  dbnz  b, label_2FD7
+  dbnz  b, .page
   ret
-label_300E:
+.program:
   ld    $54
-  st    $7D
+  st    FmBank
   ld    $55
-  st    $7E
+  st    FmAddrHi
   ld    $56
-  st    $7F
+  st    FmAddrLo
   push  b
   push  c
-  callf label_E024
+  callf FlashWriteEntry
   pop   c
   pop   b
-  callf label_E01B
-  bz    label_2FEE
-  dbnz  c, label_300E
-  callf label_303D
+  callf FlashVerifyEntry
+  bz    .next
+  dbnz  c, .program
+  callf RelocateFatBlock
   ld    $5C
-  bnz   label_3036
-  br    label_2FCF
-label_3036:
+  bnz   .fail
+  br    WriteFatFromWram
+.fail:
   ld    $5C
   or    #$08
   st    $5C
   ret
-label_303D:
+;; -----------------------------------------------------------------------------
+;; RelocateFatBlock ($303D)
+;; The FAT block has gone bad: mark it $FFFF in the work-RAM FAT, pick the highest
+;; free block below 200, mark it $FFFA, point root+$46 at it and rewrite the root block.
+;; FsError bit 6 if the root block can't be written, bit 2 if there is no free block.
+;; -----------------------------------------------------------------------------
+RelocateFatBlock:
   push  acc
   push  b
   push  c
@@ -5633,22 +6506,22 @@ label_303D:
   mov   #$FF, vtrbf
   set1  vrmad2, $00
   mov   #$CC, vrmad1
-label_3069:
+.scan:
   ld    vtrbf
-  bne   #$FC, label_3079
+  bne   #$FC, .next
   ld    vtrbf
-  be    #$FF, label_3086
+  be    #$FF, .found
   ld    vrmad1
   sub   #$02
   st    vrmad1
-label_3079:
+.next:
   ld    vrmad1
   and   #$FE
   sub   #$02
-  be    #$8E, label_30DB
+  be    #$8E, .full
   st    vrmad1
-  br    label_3069
-label_3086:
+  br    .scan
+.found:
   ld    vrmad1
   sub   #$02
   st    vrmad1
@@ -5657,24 +6530,24 @@ label_3086:
   ror
   or    #$80
   push  acc
-  mov   #$01, $7D
-  mov   #$FE, $7E
-  mov   #$00, $7F
-  callf label_E027
+  mov   #$01, FmBank
+  mov   #$FE, FmAddrHi
+  mov   #$00, FmAddrLo
+  callf FlashReadEntry
   pop   acc
   st    $C6
   mov   #$00, $C7
   mov   #$03, c
   push  acc
-label_30AF:
+.writeRoot:
   push  c
-  callf label_E024
+  callf FlashWriteEntry
   pop   c
-  callf label_E01B
-  bz    label_30C0
-  dbnz  c, label_30AF
-  br    label_30D1
-label_30C0:
+  callf FlashVerifyEntry
+  bz    .ok
+  dbnz  c, .writeRoot
+  br    .rootFailed
+.ok:
   pop   acc
   clr1  psw, cy
   rolc
@@ -5683,23 +6556,31 @@ label_30C0:
   st    $56
   rolc
   st    $54
-  br    label_30E1
-label_30D1:
+  br    .return
+.rootFailed:
   ld    $5C
   or    #$40
   st    $5C
   pop   acc
-  br    label_30E1
-label_30DB:
+  br    .return
+.full:
   ld    $5C
   or    #$04
   st    $5C
-label_30E1:
+.return:
   pop   c
   pop   b
   pop   acc
   ret
-label_30E8:
+;; -----------------------------------------------------------------------------
+;; RelocateDirBlock ($30E8)
+;; A directory page at TRH:TRL won't program. Copy the whole directory block (with the
+;; freshly modified page from bank 1 swapped in) to a free block in the 200-230 area,
+;; relink it in place of the bad one (either root+$4A or the previous block's FAT
+;; entry), mark the bad block $FFFF and write FAT/root back.
+;; FsError: bit 2 no free block, bit 3 broken chain, bit 5/6 root or FAT write failed.
+;; -----------------------------------------------------------------------------
+RelocateDirBlock:
   push  acc
   push  b
   push  c
@@ -5709,42 +6590,42 @@ label_30E8:
   ld    trl
   and   #$80
   st    vrmad1
-  call  label_358D
+  call  CopyBufToWram
   mov   #$04, b
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   clr1  psw, rambk0
   ld    FlashBankTemp
   set1  psw, rambk0
-  st    $7D
+  st    FmBank
   ld    trh
   and   #$FE
-  st    $7E
-  mov   #$00, $7F
-label_3115:
+  st    FmAddrHi
+  mov   #$00, FmAddrLo
+.page:
   push  trh
   push  trl
-  callf label_E027
+  callf FlashReadEntry
   pop   trl
   pop   trh
-  ld    $7E
+  ld    FmAddrHi
   and   #$01
   st    c
   ld    trh
   and   #$01
   xor   c
-  bnz   label_313C
-  ld    $7F
+  bnz   .swap
+  ld    FmAddrLo
   and   #$80
   st    c
   ld    trl
   and   #$80
   xor   c
-  bz    label_3140
-label_313C:
-  call  label_358D
-  br    label_314E
-label_3140:
+  bz    .next
+.swap:
+  call  CopyBufToWram
+  br    .advance
+.next:
   ld    vrmad1
   add   #$80
   st    vrmad1
@@ -5752,14 +6633,14 @@ label_3140:
   addc  #$00
   and   #$01
   st    vrmad2
-label_314E:
-  ld    $7F
+.advance:
+  ld    FmAddrLo
   add   #$80
-  st    $7F
-  ld    $7E
+  st    FmAddrLo
+  ld    FmAddrHi
   addc  #$00
-  st    $7E
-  dbnz  b, label_3115
+  st    FmAddrHi
+  dbnz  b, .page
   clr1  psw, rambk0
   push  FlashBankTemp
   push  trh
@@ -5770,15 +6651,15 @@ label_314E:
   mov   #$46, trl
   callf PrepareFlashBlockRead
   set1  psw, rambk0
-  st    $7D
+  st    FmBank
   ld    trh
   or    #$01
-  st    $7E
-  mov   #$80, $7F
-  callf label_E027
+  st    FmAddrHi
+  mov   #$80, FmAddrLo
+  callf FlashReadEntry
   mov   #$00, vrmad1
   clr1  vrmad2, $00
-  call  label_35D1
+  call  SwapBufWithWram
   pop   trl
   pop   trh
   clr1  psw, rambk0
@@ -5801,7 +6682,7 @@ label_314E:
   st    $40
   ld    vtrbf
   st    $41
-label_31B8:
+.findBlock:
   ld    $44
   rol
   and   #$7E
@@ -5811,22 +6692,22 @@ label_31B8:
   mov   #$FF, vtrbf
   mov   #$4C, vrmad1
   mov   #$1F, b
-label_31CD:
+.scan:
   ld    vtrbf
-  be    #$FC, label_31E5
+  be    #$FC, .found
   ld    vtrbf
-label_31D4:
+.next2:
   ld    vrmad1
   sub   #$04
   st    vrmad1
-  dbnz  b, label_31CD
+  dbnz  b, .scan
   ld    $5C
   or    #$04
   st    $5C
-  jmp   label_3376
-label_31E5:
+  jmp   .return
+.found:
   ld    vtrbf
-  bne   #$FF, label_31D4
+  bne   #$FF, .next2
   dec   vrmad1
   dec   vrmad1
   ld    vrmad1
@@ -5841,33 +6722,33 @@ label_31E5:
   ld    $44
   clr1  psw, cy
   rolc
-  st    $7E
+  st    FmAddrHi
   mov   #$00, acc
   rolc
-  st    $7D
-  mov   #$00, $7F
+  st    FmBank
+  mov   #$00, FmAddrLo
   mov   #$80, vrmad1
   clr1  vrmad2, $00
   mov   #$04, c
   mov   #$03, b
-label_321A:
+.copyPage:
   push  b
   push  c
-  callf label_E024
+  callf FlashWriteEntry
   pop   c
   pop   b
-  callf label_E01B
-  bz    label_322F
-  dbnz  b, label_321A
-  jmp   label_31B8
-label_322F:
-  ld    $7F
+  callf FlashVerifyEntry
+  bz    .pageOk
+  dbnz  b, .copyPage
+  jmp   .findBlock
+.pageOk:
+  ld    FmAddrLo
   add   #$80
-  st    $7F
-  ld    $7E
+  st    FmAddrLo
+  ld    FmAddrHi
   addc  #$00
-  st    $7E
-  call  label_35D1
+  st    FmAddrHi
+  call  SwapBufWithWram
   ld    vrmad1
   add   #$80
   st    vrmad1
@@ -5876,7 +6757,7 @@ label_322F:
   and   #$01
   st    vrmad2
   mov   #$03, b
-  dbnz  c, label_321A
+  dbnz  c, .copyPage
   mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, FlashBankTemp
@@ -5885,43 +6766,43 @@ label_322F:
   mov   #$4A, trl
   ldf
   xor   $42
-  bnz   label_32AE
+  bnz   .relinkChain
   inc   trl
   ldf
   xor   $43
   dec   trl
-  bnz   label_32AE
+  bnz   .relinkChain
   mov   #$00, vrmad1
   clr1  vrmad2, $00
-  call  label_358D
-  mov   #$01, $7D
-  mov   #$FE, $7E
-  mov   #$00, $7F
-  callf label_E027
+  call  CopyBufToWram
+  mov   #$01, FmBank
+  mov   #$FE, FmAddrHi
+  mov   #$00, FmAddrLo
+  callf FlashReadEntry
   ld    $44
   st    $CA
   ld    $45
   st    $CB
   mov   #$03, c
-label_328E:
+.writeRoot:
   push  c
-  callf label_E024
+  callf FlashWriteEntry
   pop   c
-  callf label_E01B
-  bz    label_32A5
-  dbnz  c, label_328E
+  callf FlashVerifyEntry
+  bz    .rootUpdated
+  dbnz  c, .writeRoot
   ld    $5C
   or    #$40
   st    $5C
-  jmp   label_3376
-label_32A5:
+  jmp   .return
+.rootUpdated:
   mov   #$00, vrmad1
   clr1  vrmad2, $00
-  call  label_35AF
-  jmp   label_32EA
-label_32AE:
+  call  CopyWramToBuf
+  jmp   .writeFat
+.relinkChain:
   ldf
-label_32AF:
+.walk:
   and   #$7F
   rol
   st    $00
@@ -5932,31 +6813,31 @@ label_32AF:
   st    c
   dec   $00
   ld    b
-  be    #$FA, label_32DD
-label_32C3:
+  be    #$FA, .endOfChain
+.compare:
   ld    b
   xor   $42
-  bnz   label_32D9
+  bnz   .continue
   ld    c
   xor   $43
-  bnz   label_32D9
+  bnz   .continue
   ld    $44
   st    @R0
   inc   $00
   ld    $45
   st    @R0
-  jmp   label_32EA
-label_32D9:
+  jmp   .writeFat
+.continue:
   ld    b
-  jmp   label_32AF
-label_32DD:
+  jmp   .walk
+.endOfChain:
   ld    c
-  bne   #$FF, label_32C3
+  bne   #$FF, .compare
   ld    $5C
   or    #$08
   st    $5C
-  jmp   label_3376
-label_32EA:
+  jmp   .return
+.writeFat:
   mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, FlashBankTemp
@@ -5964,24 +6845,24 @@ label_32EA:
   mov   #$46, trl
   callf PrepareFlashBlockRead
   set1  psw, rambk0
-  st    $7D
+  st    FmBank
   ld    trh
   or    #$01
-  st    $7E
-  mov   #$80, $7F
+  st    FmAddrHi
+  mov   #$80, FmAddrLo
   mov   #$03, b
-label_330B:
+.tryFat:
   push  b
-  callf label_E024
+  callf FlashWriteEntry
   pop   b
-  callf label_E01B
-  bnz   label_3319
-  jmp   label_3376
-label_3319:
-  dbnz  b, label_330B
+  callf FlashVerifyEntry
+  bnz   .fatRetry
+  jmp   .return
+.fatRetry:
+  dbnz  b, .tryFat
   mov   #$80, vrmad1
   set1  vrmad2, $00
-  call  label_358D
+  call  CopyBufToWram
   mov   #$01, fpr
   clr1  psw, rambk0
   mov   #$01, FlashBankTemp
@@ -5990,58 +6871,66 @@ label_3319:
   callf PrepareFlashBlockRead
   set1  psw, rambk0
   st    $54
-  st    $7D
+  st    FmBank
   ld    trh
   st    $55
-  st    $7E
+  st    FmAddrHi
   ld    trl
   st    $56
-  st    $7F
+  st    FmAddrLo
   mov   #$00, vrmad1
   clr1  vrmad2, $00
   mov   #$03, c
-label_334E:
-  callf label_E027
-  call  label_358D
-  ld    $7F
+.reload:
+  callf FlashReadEntry
+  call  CopyBufToWram
+  ld    FmAddrLo
   add   #$80
-  st    $7F
+  st    FmAddrLo
   mov   #$00, acc
-  addc  $7E
-  st    $7E
-  dbnz  c, label_334E
-  callf label_303D
+  addc  FmAddrHi
+  st    FmAddrHi
+  dbnz  c, .reload
+  callf RelocateFatBlock
   ld    $5C
-  bz    label_3371
+  bz    .fatMoved
   or    #$20
   st    $5C
-  brf   label_3376
-label_3371:
-  callf label_2FCF
+  brf   .return
+.fatMoved:
+  callf WriteFatFromWram
   ld    $5C
-label_3376:
+.return:
   pop   c
   pop   b
   pop   acc
   ret
 
+Str_DeletePrompt:
   .string 9 "Delete ?"
+Str_Deleted:
   .string 9 "Deleted "
 
-label_338F:
-  callf label_E015
-  mov   #$03, ie
+;; -----------------------------------------------------------------------------
+;; HardwareInit ($338F)
+;; Power-on peripheral setup: flash controller (FlashInit), interrupt enables and
+;; priorities, base timer (0.5 s interrupt 0, fast interrupt 1 off), LCD controller
+;; on, P1 idle, P3 as inputs with interrupts, SIO and timers stopped.
+;; -----------------------------------------------------------------------------
+HardwareInit:
+  callf FlashInitEntry
+  mov   #$03, ie                        ; IE: enable INT0/INT1 (IE.7, the master enable, is set below)
   mov   #$02, ip
   clr1  btcr, $06
   clr1  btcr, $07
   clr1  isl, $04
-  set1  btcr, $00
-  set1  btcr, $06
+  set1  btcr, $00                       ; BTCR.0: base timer interrupt 0 (half-second) enabled
+  set1  btcr, $06                       ; BTCR.6: base timer running
   set1  ie, $07
-  mov   #$09, mcr
+  mov   #$09, mcr                       ; MCR $09: LCD on, graphics mode
   mov   #$05, cnr
   mov   #$20, tdr
-  mov   #$80, vccr
+  mov   #$80, vccr                      ; VCCR.7: LCD power on
   mov   #$00, stad
   mov   #$00, b
   mov   #$80, p1ddr
@@ -6051,7 +6940,7 @@ label_338F:
   set1  p1, $06
   set1  p1, $07
   mov   #$00, p3ddr
-  mov   #$05, p3int
+  mov   #$05, p3int                     ; P3INT: button interrupt enabled, wake from HALT
   mov   #$FF, p3
   mov   #$00, i01cr
   mov   #$00, i23cr
@@ -6062,62 +6951,80 @@ label_338F:
   mov   #$00, t1cnt
   mov   #$00, t0con
   ret
-label_33E6:
+;; -----------------------------------------------------------------------------
+;; StartupBeep ($33E6)
+;; Short beep at power-on: Timer 1 PWM on P1.7. Standalone it waits 3-4 half-second
+;; ticks; in a controller it stops at the next tick.
+;; -----------------------------------------------------------------------------
+StartupBeep:
   ld    p7
   and   #$01
-  bnz   label_3413
+  bnz   .inController
   mov   #$00, t1cnt
   clr1  p1, $07
   mov   #$FF, t1lc
   mov   #$FE, t1lr
   mov   #$50, t1cnt
-  mov   #$00, SerialTimeout
-label_33FD:
+  mov   #$00, HalfSecTicks
+.wait:
   set1  pcon, $00
-  ld    SerialTimeout
-  be    #$03, label_33FD
-  bp    psw, cy, label_33FD
-label_3407:
+  ld    HalfSecTicks
+  be    #$03, .wait
+  bp    psw, cy, .wait
+.stop:
   set1  p1, $07
   mov   #$FF, t1lr
   mov   #$FF, t1lc
   mov   #$00, t1cnt
   ret
-label_3413:
+.inController:
   mov   #$00, t1cnt
   clr1  p1, $07
   mov   #$FF, t1lc
   mov   #$FE, t1lr
   mov   #$50, t1cnt
-  mov   #$00, SerialTimeout
-label_3424:
+  mov   #$00, HalfSecTicks
+.waitTick:
   set1  pcon, $00
-  ld    SerialTimeout
-  bnz   label_3407
-  br    label_3424
-label_342C:
+  ld    HalfSecTicks
+  bnz   .stop
+  br    .waitTick
+;; -----------------------------------------------------------------------------
+;; FastTickOn ($342C)
+;; Enable base timer interrupt 1 (the fast tick used for key repeat) and let
+;; BaseTimerIsr count it in FastTicks.
+;; -----------------------------------------------------------------------------
+FastTickOn:
   push  psw
   set1  btcr, $05
   set1  btcr, $04
   clr1  btcr, $03
   clr1  psw, rambk0
-  mov   #$00, $73
+  mov   #$00, FastTickDisabled
   set1  btcr, $02
-  br    label_3448
-label_343D:
+  br    FastTickOff_return
+;; -----------------------------------------------------------------------------
+;; FastTickOff ($343D)
+;; Disable the fast tick again.
+;; -----------------------------------------------------------------------------
+FastTickOff:
   push  psw
   clr1  btcr, $03
   clr1  psw, rambk0
-  mov   #$FF, $73
+  mov   #$FF, FastTickDisabled
   clr1  btcr, $02
-label_3448:
+FastTickOff_return:
   pop   psw
   ret
-label_344B:
+;; -----------------------------------------------------------------------------
+;; BcdToBin ($344B)
+;; ACC (two BCD digits) -> ACC binary. Uses MathHi as scratch.
+;; -----------------------------------------------------------------------------
+BcdToBin:
   push  b
   push  c
   push  $00
-  mov   #$52, $00
+  mov   #MathHi, $00
   st    @R0
   and   #$F0
   ror
@@ -6135,26 +7042,30 @@ label_344B:
   pop   c
   pop   b
   ret
-label_3470:
+;; -----------------------------------------------------------------------------
+;; Bcd16ToBin ($3470)
+;; Four BCD digits at @R0 (high byte first) -> binary in MathHi:MathLo.
+;; -----------------------------------------------------------------------------
+Bcd16ToBin:
   push  b
   push  c
   push  $01
   push  $00
   mov   #$00, b
   mov   #$00, c
-  mov   #$52, $01
+  mov   #MathHi, $01
   ld    @R0
   st    @R1
   inc   $00
   inc   $01
   ld    @R0
   st    @R1
-  mov   #$52, $01
-label_348C:
+  mov   #MathHi, $01
+.thousands:
   ld    @R1
-  be    @R1, #$10, label_3493
-  bp    psw, cy, label_34A4
-label_3493:
+  be    @R1, #$10, .subThousand
+  bp    psw, cy, .hundreds
+.subThousand:
   sub   #$10
   st    @R1
   ld    b
@@ -6163,10 +7074,10 @@ label_3493:
   ld    c
   addc  #$03
   st    c
-  br    label_348C
-label_34A4:
+  br    .thousands
+.hundreds:
   ld    @R1
-  bz    label_34B8
+  bz    .tensDigit
   sub   #$01
   st    @R1
   ld    b
@@ -6175,14 +7086,14 @@ label_34A4:
   ld    c
   addc  #$00
   st    c
-  br    label_34A4
-label_34B8:
+  br    .hundreds
+.tensDigit:
   inc   $01
-label_34BA:
+.tens:
   ld    @R1
-  be    @R1, #$10, label_34C1
-  bp    psw, cy, label_34D2
-label_34C1:
+  be    @R1, #$10, .subTen
+  bp    psw, cy, .ones
+.subTen:
   sub   #$10
   st    @R1
   ld    b
@@ -6191,10 +7102,10 @@ label_34C1:
   ld    c
   addc  #$00
   st    c
-  br    label_34BA
-label_34D2:
+  br    .tens
+.ones:
   ld    @R1
-  bz    label_34E6
+  bz    .store
   sub   #$01
   st    @R1
   ld    b
@@ -6203,9 +7114,9 @@ label_34D2:
   ld    c
   addc  #$00
   st    c
-  br    label_34D2
-label_34E6:
-  mov   #$52, $01
+  br    .ones
+.store:
+  mov   #MathHi, $01
   ld    c
   st    @R1
   inc   $01
@@ -6216,7 +7127,11 @@ label_34E6:
   pop   c
   pop   b
   ret
-label_34FA:
+;; -----------------------------------------------------------------------------
+;; BinToBcd ($34FA)
+;; ACC (0-99) -> ACC as two BCD digits.
+;; -----------------------------------------------------------------------------
+BinToBcd:
   push  b
   push  c
   push  $00
@@ -6235,14 +7150,18 @@ label_34FA:
   pop   c
   pop   b
   ret
-label_351A:
+;; -----------------------------------------------------------------------------
+;; Bin16ToBcd ($351A)
+;; 16-bit binary at @R0 (high byte first, 0-9999) -> four BCD digits in MathHi:MathLo.
+;; -----------------------------------------------------------------------------
+Bin16ToBcd:
   push  b
   push  c
   push  $01
   push  $00
   mov   #$00, b
   mov   #$00, c
-  mov   #$52, $01
+  mov   #MathHi, $01
   ld    @R0
   st    @R1
   inc   $00
@@ -6302,11 +7221,15 @@ label_351A:
   pop   c
   pop   b
   ret
-label_358D:
+;; -----------------------------------------------------------------------------
+;; CopyBufToWram ($358D)
+;; Copy the 128-byte bank 1 buffer ($80-$FF) to work RAM at VRMAD (auto-increment).
+;; -----------------------------------------------------------------------------
+CopyBufToWram:
   push  b
   mov   #$80, $00
   mov   #$20, b
-label_3595:
+.loop:
   ld    @R0
   st    vtrbf
   inc   $00
@@ -6319,14 +7242,18 @@ label_3595:
   ld    @R0
   st    vtrbf
   inc   $00
-  dbnz  b, label_3595
+  dbnz  b, .loop
   pop   b
   ret
-label_35AF:
+;; -----------------------------------------------------------------------------
+;; CopyWramToBuf ($35AF)
+;; Copy 128 bytes of work RAM at VRMAD into the bank 1 buffer ($80-$FF).
+;; -----------------------------------------------------------------------------
+CopyWramToBuf:
   push  b
   mov   #$80, $00
   mov   #$20, b
-label_35B7:
+.loop:
   ld    vtrbf
   st    @R0
   inc   $00
@@ -6339,20 +7266,25 @@ label_35B7:
   ld    vtrbf
   st    @R0
   inc   $00
-  dbnz  b, label_35B7
+  dbnz  b, .loop
   pop   b
   ret
-label_35D1:
+;; -----------------------------------------------------------------------------
+;; SwapBufWithWram ($35D1)
+;; Exchange the bank 1 buffer ($80-$FF) with 128 bytes of work RAM at VRMAD, 32 bytes
+;; at a time through bank 1 $10-$2F.
+;; -----------------------------------------------------------------------------
+SwapBufWithWram:
   push  b
   push  c
   push  vrmad1
   push  vrmad2
   mov   #$80, $00
   mov   #$04, b
-label_35DF:
+.chunk:
   mov   #$08, c
-  mov   #$10, $01
-label_35E5:
+  mov   #DataToTransmit, $01
+.save:
   ld    @R0
   st    @R1
   inc   $00
@@ -6369,12 +7301,12 @@ label_35E5:
   st    @R1
   inc   $00
   inc   $01
-  dbnz  c, label_35E5
+  dbnz  c, .save
   ld    $00
   sub   #$20
   st    $00
   mov   #$08, c
-label_3609:
+.fromWram:
   ld    vtrbf
   st    @R0
   inc   $00
@@ -6387,13 +7319,13 @@ label_3609:
   ld    vtrbf
   st    @R0
   inc   $00
-  dbnz  c, label_3609
+  dbnz  c, .fromWram
   ld    vrmad1
   sub   #$20
   st    vrmad1
-  mov   #$10, $01
+  mov   #DataToTransmit, $01
   mov   #$08, c
-label_362C:
+.toWram:
   ld    @R1
   st    vtrbf
   inc   $01
@@ -6406,19 +7338,37 @@ label_362C:
   ld    @R1
   st    vtrbf
   inc   $01
-  dbnz  c, label_362C
-  dbnz  b, label_35DF
+  dbnz  c, .toWram
+  dbnz  b, .chunk
   pop   vrmad2
   pop   vrmad1
   pop   c
   pop   b
   ret
 
-  .byte $F8, $4E, $F8, $07, $D8, $4E, $03, $5C, $E1, $01, $90, $06, $02, $70, $E1, $30
-  .byte $90, $EE, $A0
+;; -----------------------------------------------------------------------------
+;; WaitABReleased ($364F)
+;; Unreferenced: like WaitDpadReleased but for A/B.
+;; -----------------------------------------------------------------------------
+WaitABReleased:
+  set1  p3int, $00
+  set1  pcon, $00
+  clr1  p3int, $00
+  ld    p7
+  and   #$01
+  bnz   .return
+  ld    Buttons_Current
+  and   #$30
+  bnz   WaitABReleased
+.return:
+  ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_3662:
+;; -----------------------------------------------------------------------------
+;; WaitDpadReleased ($3662)
+;; HALT until no d-pad direction is held (or the controller is plugged in).
+;; -----------------------------------------------------------------------------
+WaitDpadReleased:
   set1  p3int, $00 ; enable P3 IRQ
   set1  pcon, $00  ; halt
   clr1  p3int, $00 ; now disable it again
@@ -6427,12 +7377,16 @@ label_3662:
   bnz   .Still_In  ; 1 = VMU is inserted in the controller
   ld    Buttons_Current
   and   #%00001111
-  bnz   label_3662 ; loop untill the player is not holding any Dpad direction
+  bnz   WaitDpadReleased ; loop untill the player is not holding any Dpad direction
 .Still_In:
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_3675:
+;; -----------------------------------------------------------------------------
+;; WaitAllButtonsReleased ($3675)
+;; HALT until no button at all is held (or the controller is plugged in).
+;; -----------------------------------------------------------------------------
+WaitAllButtonsReleased:
   set1  p3int, $00 ; enable P3 IRQ
   set1  pcon, $00  ; halt
   clr1  p3int, $00 ; disable P3 again
@@ -6440,260 +7394,300 @@ label_3675:
   and   #$01
   bnz   .Still_In ; 1 = VMU is inserted in the controller
   ld    Buttons_Current
-  bnz   label_3675
+  bnz   WaitAllButtonsReleased
 .Still_In:
   ret
   
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-Clear_User_RAM: ; simply sets the whole USER RAM to zero
+;; -----------------------------------------------------------------------------
+;; ClearUserRam ($3686)
+;; Zero all of RAM bank 1 (the application's bank).
+;; -----------------------------------------------------------------------------
+ClearUserRam:
   set1  psw, rambk0 ; set to USER bank
   mov   #$00, $00
-label_368B:
+.loop:
   mov   #$00, @R0
   inc   $00
   ld    $00
-  bnz   label_368B
+  bnz   .loop
   clr1  psw, rambk0
   ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-label_3696:
+;; -----------------------------------------------------------------------------
+;; WaitKeyEvent ($3696)
+;; Main input routine for menus. HALTs until something happens and returns it in ACC:
+;; A, B, Left, Right return immediately while held; Up/Down only on a half-second tick
+;; (slow auto-repeat). System events ($FF/$FE/$FD/$FC, see CheckSystemEvents) win.
+;; B on entry is overwritten with the current BiosMode (used to detect MODE).
+;; -----------------------------------------------------------------------------
+WaitKeyEvent:
   push  b
   push  psw
   clr1  psw, rambk0
-  ld    $30
+  ld    BiosMode
   st    b
-label_36A0:
+.loop:
   set1  p3int, $00
   set1  pcon, $00
   clr1  p3int, $00
-  call  label_3760
-  bnz   label_36D3
-  ld    $70
+  call  CheckSystemEvents
+  bnz   WaitKeyEvent_return
+  ld    Buttons_Current
   and   #$10
-  bnz   label_36D3
-  ld    $70
+  bnz   WaitKeyEvent_return
+  ld    Buttons_Current
   and   #$20
-  bnz   label_36D3
-  ld    $70
+  bnz   WaitKeyEvent_return
+  ld    Buttons_Current
   and   #$04
-  bnz   label_36D3
-  ld    $70
+  bnz   WaitKeyEvent_return
+  ld    Buttons_Current
   and   #$08
-  bnz   label_36D3
-  ld    SerialTimeout
-  bz    label_36A0
-  mov   #$00, SerialTimeout
-  ld    $70
+  bnz   WaitKeyEvent_return
+  ld    HalfSecTicks
+  bz    .loop
+  mov   #$00, HalfSecTicks
+  ld    Buttons_Current
   and   #$01
-  bnz   label_36D3
-  ld    $70
+  bnz   WaitKeyEvent_return
+  ld    Buttons_Current
   and   #$02
-label_36D3:
+WaitKeyEvent_return:
   pop   psw
   pop   b
   ret
-label_36D8:
+;; -----------------------------------------------------------------------------
+;; WaitKeyEventSlow ($36D8)
+;; Like WaitKeyEvent, but only A/B are immediate; all four directions wait for a
+;; half-second tick.
+;; -----------------------------------------------------------------------------
+WaitKeyEventSlow:
   push  b
   push  psw
   clr1  psw, rambk0
-  ld    $30
+  ld    BiosMode
   st    b
-label_36E2:
+.loop:
   set1  p3int, $00
   set1  pcon, $00
   clr1  p3int, $00
-  call  label_3760
-  bnz   label_3715
-  ld    $70
+  call  CheckSystemEvents
+  bnz   .return
+  ld    Buttons_Current
   and   #$10
-  bnz   label_3715
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$20
-  bnz   label_3715
-  ld    SerialTimeout
-  bz    label_36E2
-  mov   #$00, SerialTimeout
-  ld    $70
+  bnz   .return
+  ld    HalfSecTicks
+  bz    .loop
+  mov   #$00, HalfSecTicks
+  ld    Buttons_Current
   and   #$01
-  bnz   label_3715
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$02
-  bnz   label_3715
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$04
-  bnz   label_3715
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$08
-label_3715:
-  brf   label_36D3
-label_3718:
+.return:
+  brf   WaitKeyEvent_return
+;; -----------------------------------------------------------------------------
+;; WaitKeyEventRepeat ($3718)
+;; Like WaitKeyEvent with faster d-pad repeat: A/B immediate, directions once
+;; FastTicks (base timer interrupt 1) has counted 4.
+;; -----------------------------------------------------------------------------
+WaitKeyEventRepeat:
   push  b
   push  psw
   clr1  psw, rambk0
-  ld    $30
+  ld    BiosMode
   st    b
-  call  label_342C
-  mov   #$00, $74
-label_3727:
+  call  FastTickOn
+  mov   #$00, FastTicks
+.loop:
   set1  p3int, $00
   set1  pcon, $00
   clr1  p3int, $00
-  call  label_3760
-  bnz   label_375B
-  ld    $70
+  call  CheckSystemEvents
+  bnz   .return
+  ld    Buttons_Current
   and   #$10
-  bnz   label_375B
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$20
-  bnz   label_375B
-  ld    $74
-  be    #$04, label_3727
-  bp    psw, cy, label_3727
-  ld    $70
+  bnz   .return
+  ld    FastTicks
+  be    #$04, .loop
+  bp    psw, cy, .loop
+  ld    Buttons_Current
   and   #$01
-  bnz   label_375B
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$02
-  bnz   label_375B
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$04
-  bnz   label_375B
-  ld    $70
+  bnz   .return
+  ld    Buttons_Current
   and   #$08
-label_375B:
-  call  label_343D
-  brf   label_36D3
-label_3760:
+.return:
+  call  FastTickOff
+  brf   WaitKeyEvent_return
+;; -----------------------------------------------------------------------------
+;; CheckSystemEvents ($3760)
+;; Shared by the WaitKeyEvent family (B = BiosMode at entry). Out: ACC
+;;   $FF  controller plugged in
+;;   $FD  BiosMode changed (MODE was pressed)
+;;   $FC  another VMU connected and CopyRxArm == 1, unless A alone is held
+;;        (holding A suppresses it: CopyRxArm = $FF)
+;;   $FE  sleep requested and SleepCtl says the caller handles it ($80 context)
+;;   $00  nothing; auto-sleep/SLEEP may have been serviced in here (SleepUntilWake)
+;; SleepCtl: bit0 toggled by SLEEP, $40 = never sleep here, $80 = return $FE.
+;; IdleTicks wrapping to 0 (~2 minutes without a button) means auto-sleep.
+;; -----------------------------------------------------------------------------
+CheckSystemEvents:
   ld    p7
   and   #$01
-  bnz   label_3798
-  ld    $33
-  bz    label_379C
-  ld    $35
+  bnz   .pluggedIn
+  ld    IdleTicks
+  bz    .sleepCheck
+  ld    SleepCtl
   and   #$01
-  bnz   label_379C
-  ld    $30
+  bnz   .sleepCheck
+  ld    BiosMode
   xor   b
-  bnz   label_37CE
+  bnz   .modeChanged
   ld    p7
   and   #$09
-  be    #$08, label_377F
-  br    label_3794
-label_377F:
-  ld    $2B
-  bz    label_3794
-  be    #$FF, label_3794
-  ld    $70
-  bne   #$10, label_3790
-  mov   #$FF, $2B
-  br    label_3794
-label_3790:
+  be    #$08, .vmuConnected
+  br    .none
+.vmuConnected:
+  ld    CopyRxArm
+  bz    .none
+  be    #$FF, .none
+  ld    Buttons_Current
+  bne   #$10, .startReceive
+  mov   #$FF, CopyRxArm
+  br    .none
+.startReceive:
   mov   #$FC, acc
   ret
-label_3794:
+.none:
   mov   #$00, acc
   ret
-label_3798:
+.pluggedIn:
   mov   #$FF, acc
   ret
-label_379C:
-  ld    $33
-  bnz   label_37A2
-  br    label_37AB
-label_37A2:
-  ld    $35
-  be    #$01, label_37B8
+.sleepCheck:
+  ld    IdleTicks
+  bnz   .sleepRequested
+  br    .sleepContext
+.sleepRequested:
+  ld    SleepCtl
+  be    #$01, .sleepHere
   and   #$01
-  bz    label_3794
-label_37AB:
-  ld    $35
-  bz    label_37B8
+  bz    .none
+.sleepContext:
+  ld    SleepCtl
+  bz    .sleepHere
   and   #$C0
-  be    #$40, label_3794
+  be    #$40, .none
   mov   #$FE, acc
   ret
-label_37B8:
-  ld    $73
-  bnz   label_37C7
-  call  label_343D
-  callf label_0421
-  call  label_342C
+.sleepHere:
+  ld    FastTickDisabled
+  bnz   .sleepNoFastTick
+  call  FastTickOff
+  callf SleepUntilWake
+  call  FastTickOn
   clr1  p3int, $00
-  br    label_3794
-label_37C7:
-  callf label_0421
+  br    .none
+.sleepNoFastTick:
+  callf SleepUntilWake
   clr1  p3int, $00
-  br    label_3794
-label_37CE:
+  br    .none
+.modeChanged:
   mov   #$FD, acc
   ret
-label_37D2:
+;; -----------------------------------------------------------------------------
+;; DrawChar6x8 ($37D2)
+;; Draw ASCII character ACC from the 6x8 font at text cell (CursorX 0-7, CursorY 0-3).
+;; Cells are 6 pixels wide, so they straddle XRAM bytes: the glyph is shifted into
+;; place and merged with CellMaskLeft/CellMaskRight. TextInvert != 0 draws inverted.
+;; Out-of-range cells are ignored. Preserves all registers.
+;; -----------------------------------------------------------------------------
+DrawChar6x8:
   push  acc
   push  b
   push  c
-  push  $60
-  push  $61
+  push  CursorX
+  push  CursorY
   push  trh
   push  trl
   push  ocr
-  mov   #$81, ocr
-  mov   #$00, trl
-  mov   #$E8, trh
-  add   trl
+  mov   #$81, ocr                       ; OCR $81: XRAM is only writable on the RC clock
+  mov   #<FontAscii6x8, trl
+  mov   #>FontAscii6x8, trh
+  add   trl                             ; font plane 0 = $E800 + character
   st    trl
   mov   #$00, $64
-  ld    $60
-  be    #$07, label_37FC
-  bp    psw, cy, label_37FC
-  jmp   label_38CF
-label_37FC:
-  ld    $61
-  be    #$03, label_3806
-  bp    psw, cy, label_3806
-  jmp   label_38CF
-label_3806:
-  ld    $60
+  ld    CursorX
+  be    #$07, .checkRow
+  bp    psw, cy, .checkRow
+  jmp   .return
+.checkRow:
+  ld    CursorY
+  be    #$03, .inRange
+  bp    psw, cy, .inRange
+  jmp   .return
+.inRange:
+  ld    CursorX
   st    c
   mov   #$00, acc
   mov   #$06, b
   mul
   ld    c
-  st    $60
+  st    CursorX
   and   #$07
   st    $66
-  ld    $60
+  ld    CursorX
   and   #$38
   ror
   ror
   ror
   or    #$80
   st    $65
-  ld    $61
+  ld    CursorY
   rol
   rol
   rol
-  st    $61
+  st    CursorY
   and   #$08
-  bz    label_3835
+  bz    .checkBank
   ld    $65
   add   #$40
   st    $65
-label_3835:
-  ld    $61
+.checkBank:
+  ld    CursorY
   and   #$10
-  bz    label_383E
+  bz    .masks
   mov   #$01, $64
-label_383E:
+.masks:
   push  trl
   push  trh
-  mov   #$E0, trl
-  mov   #$38, trh
+  mov   #<CellMaskLeft, trl
+  mov   #>CellMaskLeft, trh
   ld    $66
   ldc
   st    $6A
-  mov   #$E8, trl
-  mov   #$38, trh
+  mov   #<CellMaskRight, trl
+  mov   #>CellMaskRight, trh
   ld    $66
   ldc
   st    $6B
@@ -6706,22 +7700,22 @@ label_383E:
   inc   acc
   st    $03
   mov   #$08, c
-label_386B:
+.row:
   mov   #$00, $68
   mov   #$00, $69
   mov   #$00, acc
   ldc
   st    $68
-  ld    $67
-  bz    label_3881
+  ld    TextInvert
+  bz    .shift
   ld    $68
   xor   #$FC
   st    $68
-label_3881:
+.shift:
   ld    $66
   st    b
-  bz    label_3896
-label_3887:
+  bz    .merge
+.shiftLoop:
   clr1  psw, cy
   ld    $68
   rorc
@@ -6729,53 +7723,61 @@ label_3887:
   ld    $69
   rorc
   st    $69
-  dbnz  b, label_3887
-label_3896:
+  dbnz  b, .shiftLoop
+.merge:
   ld    @R2
   and   $6A
   or    $68
   st    @R2
   ld    $66
-  be    #$02, label_38AA
-  bp    psw, cy, label_38AA
+  be    #$02, .nextLine
+  bp    psw, cy, .nextLine
   ld    @R3
   and   $6B
   or    $69
   st    @R3
-label_38AA:
+.nextLine:
   ld    $02
   and   #$0F
-  be    #$06, label_38C0
-  bn    psw, cy, label_38C0
+  be    #$06, .nextPair
+  bn    psw, cy, .nextPair
   ld    $02
   add   #$06
   st    $02
   inc   acc
   st    $03
-  br    label_38CA
-label_38C0:
+  br    .nextPlane
+.nextPair:
   ld    $02
   add   #$0A
   st    $02
   inc   acc
   st    $03
-label_38CA:
+.nextPlane:
   inc   trh
-  dbnz  c, label_386B
-label_38CF:
+  dbnz  c, .row
+.return:
   pop   ocr
   pop   trl
   pop   trh
-  pop   $61
-  pop   $60
+  pop   CursorY
+  pop   CursorX
   pop   c
   pop   b
   pop   acc
   ret
 
-  .byte $03, $81, $C0, $E0, $F0, $F8, $FC, $FE, $FF, $FF, $FF, $7F, $3F, $1F, $0F, $07
+CellMaskLeft:
+  .byte $03, $81, $C0, $E0, $F0, $F8, $FC, $FE
+CellMaskRight:
+  .byte $FF, $FF, $FF, $7F, $3F, $1F, $0F, $07
 
-label_38F0:
+;; -----------------------------------------------------------------------------
+;; DrawGlyph8x8 ($38F0)
+;; Draw big glyph ACC (FontGlyphs8x8) at 8x8 cell (CursorX 0-5, CursorY 0-3).
+;; TextInvert != 0 draws inverted. Preserves all registers.
+;; -----------------------------------------------------------------------------
+DrawGlyph8x8:
   push  acc
   push  b
   push  c
@@ -6789,40 +7791,40 @@ label_38F0:
   rol
   st    b
   and   #$F8
-  mov   #$73, trl
-  mov   #$04, trh
+  mov   #<FontGlyphs8x8, trl
+  mov   #>FontGlyphs8x8, trh
   add   trl
   st    trl
   ld    b
   and   #$01
   addc  trh
   st    trh
-  ld    $60
-  be    #$06, label_3994
-  bn    psw, cy, label_3994
+  ld    CursorX
+  be    #$06, .return
+  bn    psw, cy, .return
   or    #$80
   st    $65
-  ld    $61
-  be    #$04, label_3994
-  bn    psw, cy, label_3994
+  ld    CursorY
+  be    #$04, .return
+  bn    psw, cy, .return
   ror
   ror
   and   #$C0
   st    $68
   and   #$80
-  bz    label_393C
+  bz    .normal
   mov   #$01, xbnk
-label_393C:
+.normal:
   ld    $68
   and   #$40
   add   $65
   st    $02
-  ld    $67
-  bnz   label_396D
+  ld    TextInvert
+  bnz   .inverted
   mov   #$00, acc
   mov   #$04, c
   st    b
-label_3950:
+.copy:
   ld    b
   ldc
   st    @R2
@@ -6837,13 +7839,13 @@ label_3950:
   ld    $02
   add   #$0A
   st    $02
-  dbnz  c, label_3950
-  br    label_3994
-label_396D:
+  dbnz  c, .copy
+  br    .return
+.inverted:
   mov   #$00, acc
   mov   #$04, c
   st    b
-label_3975:
+.copyInv:
   ld    b
   ldc
   xor   #$FF
@@ -6860,8 +7862,8 @@ label_3975:
   ld    $02
   add   #$0A
   st    $02
-  dbnz  c, label_3975
-label_3994:
+  dbnz  c, .copyInv
+.return:
   pop   ocr
   pop   trh
   pop   trl
@@ -6869,42 +7871,46 @@ label_3994:
   pop   b
   pop   acc
   ret
-label_39A1:
+;; -----------------------------------------------------------------------------
+;; ClearCell8x8 ($39A1)
+;; Blank one 8x8 cell (filled black instead if TextInvert != 0).
+;; -----------------------------------------------------------------------------
+ClearCell8x8:
   push  acc
   push  b
   push  ocr
   mov   #$81, ocr
   mov   #$00, xbnk
-  ld    $60
-  be    #$06, label_39FE
-  bn    psw, cy, label_39FE
+  ld    CursorX
+  be    #$06, .return
+  bn    psw, cy, .return
   or    #$80
   st    $65
-  ld    $61
-  be    #$04, label_39FE
-  bn    psw, cy, label_39FE
+  ld    CursorY
+  be    #$04, .return
+  bn    psw, cy, .return
   ror
   ror
   and   #$C0
   st    $68
   and   #$80
-  bz    label_39CE
+  bz    .fill
   mov   #$01, xbnk
-label_39CE:
+.fill:
   ld    $68
   and   #$40
   add   $65
   st    $02
   mov   #$04, c
-  ld    $67
-  bz    label_39E4
+  ld    TextInvert
+  bz    .white
   mov   #$FF, acc
   st    b
-  br    label_39E9
-label_39E4:
+  br    .loop
+.white:
   mov   #$00, acc
   st    b
-label_39E9:
+.loop:
   ld    b
   st    @R2
   ld    $02
@@ -6915,163 +7921,76 @@ label_39E9:
   ld    $02
   add   #$0A
   st    $02
-  dbnz  c, label_39E9
-label_39FE:
+  dbnz  c, .loop
+.return:
   pop   ocr
   pop   b
   pop   acc
   ret
 
-;; PRE:
-;; trh, trl: address of a null terminated string to draw on the screen.
-;; $60, $61: Maybe these are X/Y tile positions for where to draw the string?
 .org $3A05
+;; -----------------------------------------------------------------------------
+;; DrawString ($3A05)
+;; Draw a zero-terminated string with DrawChar6x8. $0D moves down a row, $0A back to
+;; column 0 (so "\r\n" is a newline); text wraps from column 7 to column 0 of the
+;; same row. Preserves registers and the cursor.
+;; -----------------------------------------------------------------------------
 DrawString:
   push  acc
   push  b
   push  trh
   push  trl
-  push  $60
-  push  $61
+  push  CursorX
+  push  CursorY
   mov   #$00, acc
   st    b
-label_3A16:
+.loop:
   ld    b
   inc   b
   ldc
-  bz    label_3A34
-  be    #$0D, label_3A41
-  be    #$0A, label_3A50
-  call  label_37D2
-  inc   $60
-  ld    $60
-  be    #$07, label_3A16
-  bp    psw, cy, label_3A16
-  mov   #$00, $60
-  br    label_3A16
-label_3A34:
-  pop   $61
-  pop   $60
+  bz    .return
+  be    #$0D, .cr
+  be    #$0A, .lf
+  call  DrawChar6x8
+  inc   CursorX
+  ld    CursorX
+  be    #$07, .loop
+  bp    psw, cy, .loop
+  mov   #$00, CursorX
+  br    .loop
+.return:
+  pop   CursorY
+  pop   CursorX
   pop   trl
   pop   trh
   pop   b
   pop   acc
   ret
-label_3A41:
-  inc   $61
-  ld    $61
-  be    #$03, label_3A16
-  bp    psw, cy, label_3A16
-  mov   #$00, $61
-  br    label_3A16
-label_3A50:
-  mov   #$00, $60
-  br    label_3A16
+.cr:
+  inc   CursorY
+  ld    CursorY
+  be    #$03, .loop
+  bp    psw, cy, .loop
+  mov   #$00, CursorY
+  br    .loop
+.lf:
+  mov   #$00, CursorX
+  br    .loop
 
-  .byte $60, $60, $60, $61, $61, $05, $61, $04, $60, $00, $61, $02, $61, $00, $23, $02
-  .byte $02, $61, $02, $04, $13, $02, $E1, $F0, $C0, $C0, $C0, $C0, $1B, $6E, $0F, $D2
-  .byte $62, $60, $03, $02, $E1, $0F, $1B, $6E, $0F, $D2, $62, $00, $62, $60, $71, $02
-  .byte $53, $02, $DE, $71, $00, $71, $02, $70, $00, $71, $04, $71, $05, $70, $61, $70
-  .byte $60, $A0
-
-label_3A97:
-  push  $60
-  push  $61
-  push  trh
-  push  trl
-  push  $00
-  push  b
-  push  acc
-  ld    @R0
-  and   #$0F
-  call  label_3B6E
-  call  label_37D2
-  inc   $00
-  inc   $60
-  ld    @R0
-  st    b
-  and   #$F0
-  ror
-  ror
-  ror
-  ror
-  call  label_3B6E
-  call  label_37D2
-  inc   $60
-  ld    b
-  and   #$0F
-  call  label_3B6E
-  call  label_37D2
-  pop   acc
-  pop   b
-  pop   $00
-  pop   trl
-  pop   trh
-  pop   $61
-  pop   $60
-  ret
-label_3AD6:
-  push  $60
-  push  $61
-  push  trh
-  push  trl
-  push  b
-  push  acc
-  st    b
-  and   #$F0
-  ror
-  ror
-  ror
-  ror
-  call  label_3B6E
-  call  label_37D2
-  inc   $60
-  ld    b
-  and   #$0F
-  call  label_3B6E
-  call  label_37D2
-  pop   acc
-  pop   b
-  pop   trl
-  pop   trh
-  pop   $61
-  pop   $60
-  ret
-label_3B05:
-  push  $60
-  push  $61
-  push  trh
-  push  trl
-  push  b
-  push  acc
-  st    b
-  and   #$F0
-  ror
-  ror
-  ror
-  ror
-  call  label_38F0
-  inc   $60
-  ld    b
-  and   #$0F
-  call  label_38F0
-  pop   acc
-  pop   b
-  pop   trl
-  pop   trh
-  pop   $61
-  pop   $60
-  ret
-label_3B30:
-  push  $60
-  push  $61
+;; -----------------------------------------------------------------------------
+;; DrawBcd16 ($3A55)
+;; Unreferenced: four BCD digits at @R0 in the 6x8 font.
+;; -----------------------------------------------------------------------------
+DrawBcd16:
+  push  CursorX
+  push  CursorY
   push  trh
   push  trl
   push  $00
   push  b
   push  acc
   mov   #$02, b
-label_3B41:
+.loop:
   push  b
   ld    @R0
   st    b
@@ -7080,28 +7999,174 @@ label_3B41:
   ror
   ror
   ror
-  call  label_38F0
-  inc   $60
+  call  NibbleToHexAscii
+  call  DrawChar6x8
+  inc   CursorX
   ld    b
   and   #$0F
-  call  label_38F0
+  call  NibbleToHexAscii
+  call  DrawChar6x8
   inc   $00
-  inc   $60
+  inc   CursorX
   pop   b
-  dbnz  b, label_3B41
+  dbnz  b, .loop
   pop   acc
   pop   b
   pop   $00
   pop   trl
   pop   trh
-  pop   $61
-  pop   $60
+  pop   CursorY
+  pop   CursorX
   ret
-label_3B6E:
-  be    #$09, label_3B76
-  bp    psw, cy, label_3B76
+
+;; -----------------------------------------------------------------------------
+;; DrawBcd3Digits ($3A97)
+;; The low three BCD digits of @R0:@R0+1 in the 6x8 font (block counts).
+;; -----------------------------------------------------------------------------
+DrawBcd3Digits:
+  push  CursorX
+  push  CursorY
+  push  trh
+  push  trl
+  push  $00
+  push  b
+  push  acc
+  ld    @R0
+  and   #$0F
+  call  NibbleToHexAscii
+  call  DrawChar6x8
+  inc   $00
+  inc   CursorX
+  ld    @R0
+  st    b
+  and   #$F0
+  ror
+  ror
+  ror
+  ror
+  call  NibbleToHexAscii
+  call  DrawChar6x8
+  inc   CursorX
+  ld    b
+  and   #$0F
+  call  NibbleToHexAscii
+  call  DrawChar6x8
+  pop   acc
+  pop   b
+  pop   $00
+  pop   trl
+  pop   trh
+  pop   CursorY
+  pop   CursorX
+  ret
+;; -----------------------------------------------------------------------------
+;; DrawHexByte ($3AD6)
+;; ACC as two hex digits in the 6x8 font (dates, error codes).
+;; -----------------------------------------------------------------------------
+DrawHexByte:
+  push  CursorX
+  push  CursorY
+  push  trh
+  push  trl
+  push  b
+  push  acc
+  st    b
+  and   #$F0
+  ror
+  ror
+  ror
+  ror
+  call  NibbleToHexAscii
+  call  DrawChar6x8
+  inc   CursorX
+  ld    b
+  and   #$0F
+  call  NibbleToHexAscii
+  call  DrawChar6x8
+  pop   acc
+  pop   b
+  pop   trl
+  pop   trh
+  pop   CursorY
+  pop   CursorX
+  ret
+;; -----------------------------------------------------------------------------
+;; DrawBcdByteBig ($3B05)
+;; ACC as two BCD digits in big 8x8 glyphs.
+;; -----------------------------------------------------------------------------
+DrawBcdByteBig:
+  push  CursorX
+  push  CursorY
+  push  trh
+  push  trl
+  push  b
+  push  acc
+  st    b
+  and   #$F0
+  ror
+  ror
+  ror
+  ror
+  call  DrawGlyph8x8
+  inc   CursorX
+  ld    b
+  and   #$0F
+  call  DrawGlyph8x8
+  pop   acc
+  pop   b
+  pop   trl
+  pop   trh
+  pop   CursorY
+  pop   CursorX
+  ret
+;; -----------------------------------------------------------------------------
+;; DrawBcd16Big ($3B30)
+;; Four BCD digits at @R0 in big 8x8 glyphs (the year).
+;; -----------------------------------------------------------------------------
+DrawBcd16Big:
+  push  CursorX
+  push  CursorY
+  push  trh
+  push  trl
+  push  $00
+  push  b
+  push  acc
+  mov   #$02, b
+.loop:
+  push  b
+  ld    @R0
+  st    b
+  and   #$F0
+  ror
+  ror
+  ror
+  ror
+  call  DrawGlyph8x8
+  inc   CursorX
+  ld    b
+  and   #$0F
+  call  DrawGlyph8x8
+  inc   $00
+  inc   CursorX
+  pop   b
+  dbnz  b, .loop
+  pop   acc
+  pop   b
+  pop   $00
+  pop   trl
+  pop   trh
+  pop   CursorY
+  pop   CursorX
+  ret
+;; -----------------------------------------------------------------------------
+;; NibbleToHexAscii ($3B6E)
+;; ACC (0-15) -> '0'-'9' / 'a'-'f'.
+;; -----------------------------------------------------------------------------
+NibbleToHexAscii:
+  be    #$09, .digit
+  bp    psw, cy, .digit
   add   #$27
-label_3B76:
+.digit:
   add   #$30
   ret
 
@@ -7129,21 +8194,25 @@ DisableFlashIcon:
   push  acc
   push  ocr
   ld    ocr
-  be    #$81, label_3BA1
+  be    #$81, .skip
   mov   #$81, ocr
-label_3BA1:
+.skip:
   mov   #$02, xbnk
   mov   #$00, xram_0184
   br    FlashEpilogue
 
-label_3BA9:
+;; -----------------------------------------------------------------------------
+;; ClearScreenAndIcons ($3BA9)
+;; Clear both XRAM banks, then write TextInvert to the 6 icon bytes in XBNK 2.
+;; -----------------------------------------------------------------------------
+ClearScreenAndIcons:
   push  b
-  call  label_3C07
-  ld    $67
+  call  ClearScreen
+  ld    TextInvert
   st    b
   mov   #$02, xbnk
   mov   #$80, $02
-label_3BB7:
+.loop:
   ld    b
   push  ocr
   mov   #$81, ocr
@@ -7151,18 +8220,22 @@ label_3BB7:
   pop   ocr
   inc   $02
   ld    $02
-  be    #$86, label_3BCA
-  br    label_3BB7
-label_3BCA:
+  be    #$86, .return
+  br    .loop
+.return:
   pop   b
   ret
-label_3BCD:
+;; -----------------------------------------------------------------------------
+;; ClearHalfScreen ($3BCD)
+;; Clear the XRAM bank currently selected in XBNK (16 lines) to TextInvert.
+;; -----------------------------------------------------------------------------
+ClearHalfScreen:
   push  acc
   push  b
   mov   #$80, $02
-  ld    $67
+  ld    TextInvert
   st    b
-label_3BD8:
+.loop:
   ld    b
   push  ocr
   mov   #$81, ocr
@@ -7181,21 +8254,33 @@ label_3BD8:
   pop   ocr
   ld    $02
   and   #$0F
-  bne   #$0C, label_3BD8
+  bne   #$0C, .loop
   ld    $02
   add   #$04
   st    $02
-  bnz   label_3BD8
+  bnz   .loop
   pop   b
   pop   acc
   ret
-label_3C07:
+;; -----------------------------------------------------------------------------
+;; ClearScreen ($3C07)
+;; Clear both halves of the LCD.
+;; -----------------------------------------------------------------------------
+ClearScreen:
   mov   #$00, xbnk
-  call  label_3BCD
+  call  ClearHalfScreen
   mov   #$01, xbnk
-  call  label_3BCD
+  call  ClearHalfScreen
   ret
-label_3C12:
+;; -----------------------------------------------------------------------------
+;; GameModeLaunch ($3C12)
+;; BiosMode 1, A pressed: light the game icon, check the root block is formatted and
+;; that FindGame accepts the directory's game entry, then start it: quartz clock,
+;; SP = $7F, RAM bank 1, toggle EXT.0 so instruction fetches come from flash, and
+;; jump to flash $0000 (the game's reset vector).
+;; Errors: "Format memory", "No saved game" (no $CC entry), "Game is damaged".
+;; -----------------------------------------------------------------------------
+GameModeLaunch:
   push  ocr
   mov   #$81, ocr
   mov   #$02, xbnk
@@ -7204,254 +8289,290 @@ label_3C12:
   mov   #$00, xram_0183
   mov   #$00, xbnk
   pop   ocr
-  mov   #$00, $6E
+  mov   #$00, BatteryCheck
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$00, trl
   mov   #$10, b
-label_3C3A:
+.checkFormat:
   ldf
   xor   #$55
-  bnz   label_3C46
+  bnz   .unformatted
   inc   trl
-  dbnz  b, label_3C3A
-  br    label_3C4B
-label_3C46:
+  dbnz  b, .checkFormat
+  br    .findGame
+.unformatted:
   mov   #$FF, acc
-  br    label_3C7A
-label_3C4B:
-  call  label_3CE6
-  bnz   label_3C7A
+  br    GameLaunchError
+.findGame:
+  call  FindGame
+  bnz   GameLaunchError
 ; Start GAME from flash, calling RESET interrupt
   mov   #$A3, ocr    ; Initialize clock (Quartz, /6)
   mov   #$7F, sp     ; Initialize stack
   set1  psw, rambk0  ; Swap to RAM bank 1
   not1  ext, $00     ; Swap to executing from Flash
   jmpf  $00          ; Jump to user's reset ISR
-label_3C5C:
+;; -----------------------------------------------------------------------------
+;; ExitToBios ($3C5C)
+;; EXIT_EX ($01F0) lands here when a game quits with MODE: reinitialise the hardware
+;; and Maple, clear the game's RAM bank and return to MainMenu with the clock
+;; selected (BiosMode 2, the mode after "game").
+;; -----------------------------------------------------------------------------
+ExitToBios:
   mov   #$A3, ocr
   mov   #$7F, sp
   clr1  psw, rambk0
-  call  label_338F
-  callf label_1007
-  callf label_1017
+  call  HardwareInit
+  callf MapleHwReset
+  callf MapleInitAddress
   clr1  vsel, $00
   clr1  vsel, $01
   clr1  mapletxrxctl, $02
-  mov   #$02, $30
-  call  Clear_User_RAM
-  jmpf  label_02EF
-label_3C7A:
+  mov   #$02, BiosMode
+  call  ClearUserRam
+  jmpf  MainMenu
+GameLaunchError:
   clr1  p3int, $00
   mov   #$01, xbnk
-  call  label_3BCD
-  be    #$FE, label_3C8F
-  be    #$FD, label_3C97
-  mov   #$0E, trl
-  mov   #$04, trh   ; Load string "Format memory"
-  br    label_3C9D
-label_3C8F:
-  mov   #$A3, trl
-  mov   #$3D, trh   ; Load string "No saved game"
-  br    label_3C9D
-label_3C97:
-  mov   #$B6, trl
-  mov   #$3D, trh   ; Load string "Game is damaged"
-label_3C9D:
-  mov   #$00, $60
-  mov   #$00, $61
+  call  ClearHalfScreen
+  be    #$FE, .noGame
+  be    #$FD, .damaged
+  mov   #<Str_FormatMemory, trl
+  mov   #>Str_FormatMemory, trh
+  br    .draw
+.noGame:
+  mov   #<Str_NoSavedGame, trl
+  mov   #>Str_NoSavedGame, trh
+  br    .draw
+.damaged:
+  mov   #<Str_GameDamaged, trl
+  mov   #>Str_GameDamaged, trh
+.draw:
+  mov   #$00, CursorX
+  mov   #$00, CursorY
   call  DrawString
-  mov   #$01, $33
-label_3CA8:
-  call  label_3696
-  be    #$FF, label_3CB2
-  be    #$FD, label_3CB2
-  br    label_3CA8
-label_3CB2:
-  call  Clear_User_RAM
-  jmpf  label_02EF
-  label_3CB7:
-  call  EnableFlashIcon      ; enable flash save icon 
-  ld    $7D             ; start address
-  bnz   label_3CE1      ; disable flash save icon
-  push  psw             ; save entry PSW
+  mov   #$01, IdleTicks
+.wait:
+  call  WaitKeyEvent
+  be    #$FF, .exit
+  be    #$FD, .exit
+  br    .wait
+.exit:
+  call  ClearUserRam
+  jmpf  MainMenu
+;; -----------------------------------------------------------------------------
+;; FmWrtExGuard ($3CB7)
+;; FM_WRT_EX / FM_WRTA_EX ($0100/$0108) land here. A game may only write to its own
+;; blocks: FmBank must be 0 and FmAddrHi <= 2 * GameLastBlock + 1 (the last page of
+;; the game file), otherwise ACC = $FF and nothing is written. On success the
+;; 128-byte page at bank 1 $80 is programmed (FM_WRT); FmAddrLo is rounded down to a
+;; page boundary. The flash access icon is lit meanwhile. Out: ACC = 0 ok.
+;; (Calling FlashLib's write at $E024 directly skips this check.)
+;; -----------------------------------------------------------------------------
+FmWrtExGuard:
+  call  EnableFlashIcon                 ; flash access icon on
+  ld    FmBank                          ; FmBank must be 0
+  bnz   .refuse                         ; refuse
+  push  psw                             ; GameLastBlock is in bank 0
   clr1  psw, rambk0     ; swap to rambank 0
-  ld    $6D             ; first byte of shit to write? 
+  ld    GameLastBlock                   ; GameLastBlock
   pop   psw             
-  bz    label_3CE1      ; first byte can't be 0?
-  set1  psw, cy
+  bz    .refuse                         ; no game file: refuse
+  set1  psw, cy                         ; ACC = 2 * GameLastBlock + 1
   rolc
-  bp    psw, cy, label_3CE1         ; HIT
-  sub   $7E                         ; start address
-  bp    psw, cy, label_3CE1
-  ld    $7F                         ; start address
+  bp    psw, cy, .refuse                ; GameLastBlock >= 128 (or 0, checked above): refuse
+  sub   FmAddrHi                        ; FmAddrHi past the game's last page?
+  bp    psw, cy, .refuse
+  ld    FmAddrLo                        ; round the address down to a page boundary
   and   #$80                        ; aligned to 128 bytes
-  st    $7F
-  callf label_E024          ; perform actual write
+  st    FmAddrLo
+  callf FlashWriteEntry                 ; FlashWritePage (FM_WRT)
   mov   #$00, acc
 ; === DISABLE FLASH SAVE ICON =====
-label_3CDE:
+.return:
   call  DisableFlashIcon
   ret
-label_3CE1:
+.refuse:
   mov   #$FF, acc
-  br    label_3CDE
-label_3CE6:
+  br    .return
+;; -----------------------------------------------------------------------------
+;; FindGame ($3CE6)
+;; Find the first game ($CC) directory entry and validate it: first block 0, size
+;; 1-255 blocks, header offset 1-255 (the VMS header can't sit in block 0, that's
+;; where the interrupt vectors go). Sets GameLastBlock = size - 1.
+;; Out: ACC = 0 ok, $FE no game, $FD entry is inconsistent.
+;; -----------------------------------------------------------------------------
+FindGame:
   mov   #$01, fpr
   mov   #$01, FlashBankTemp
   mov   #$FE, trh
   mov   #$46, trl               ; Load FAT First (0x1FE46)
   callf PrepareFlashBlockRead
   ld    FlashBankTemp
-  st    $54
+  st    FatBank
   ld    trh
-  st    $55
+  st    FatAddrHi
   ld    trl
-  st    $56
+  st    FatAddrLo
   mov   #$FE, trh
   mov   #$4A, trl
   callf PrepareFlashBlockRead
-  ld    $52
-  st    $58
-label_3D0E:
+  ld    MathHi
+  st    DirBlock
+.block:
   mov   #$10, c
-label_3D11:
+.entry:
   ldf
-  bz    label_3D17
-  be    #$CC, label_3D6D
-label_3D17:
+  bz    .next
+  be    #$CC, .found
+.next:
   ld    trl
   add   #$20
   st    trl
   ld    trh
   addc  #$00
   st    trh
-  dbnz  c, label_3D11
-  ld    $54
+  dbnz  c, .entry
+  ld    FatBank
   st    fpr
   st    FlashBankTemp
-  ld    $55
+  ld    FatAddrHi
   st    trh
-  ld    $56
+  ld    FatAddrLo
   st    trl
-  ld    $58
+  ld    DirBlock
   clr1  psw, cy
   rolc
   st    c
   mov   #$00, acc
   rolc
-  st    $52
+  st    MathHi
   ld    trl
   add   c
   st    trl
   ld    trh
-  add   $52
+  add   MathHi
   st    trh
   ldf
-  bne   #$FA, label_3D5D
+  bne   #$FA, .nextBlock
   inc   trl
   ldf
   dec   trl
-  be    #$FF, label_3D9B
-  bz    label_3D5D
-  br    label_3D9B
-label_3D5D:
+  be    #$FF, .none
+  bz    .nextBlock
+  br    .none
+.nextBlock:
   inc   trl
   ldf
-  bnz   label_3D9B
+  bnz   .none
   dec   trl
   callf PrepareFlashBlockRead
-  ld    $52
-  st    $58
-  br    label_3D0E
-label_3D6D:
+  ld    MathHi
+  st    DirBlock
+  br    .block
+.found:
   inc   trl
   inc   trl
   ldf
-  bnz   label_3D9F
+  bnz   .damaged
   inc   trl
   ldf
-  bnz   label_3D9F
+  bnz   .damaged
   ld    trl
   add   #$16
   st    trl
   ldf
-  bnz   label_3D9F
+  bnz   .damaged
   dec   trl
   ldf
-  bz    label_3D9F
+  bz    .damaged
   dec   acc
-  st    $6D
+  st    GameLastBlock
   inc   trl
   inc   trl
   ldf
-  bz    label_3D9F
+  bz    .damaged
   inc   trl
   ldf
-  bnz   label_3D9F
+  bnz   .damaged
   mov   #$00, acc
   ret
-label_3D9B:
+.none:
   mov   #$FE, acc
   ret
-label_3D9F:
+.damaged:
   mov   #$FD, acc
   ret
 
+Str_NoSavedGame:
 .string 19 "No saved\r\n    game"
+Str_GameDamaged:
 .string 19 "Game is \r\n damaged"
 
-label_3DC9:
+;; -----------------------------------------------------------------------------
+;; BaseTimerIsr ($3DC9)
+;; Base timer interrupt; TIMER_EX ($0130) calls it too. Interrupt 1 (fast tick):
+;; FastTicks++ while FastTickDisabled == 0. Interrupt 0 (every half second):
+;;   - ClockTick (the date/time keeps running even while a game runs)
+;;   - no button held -> remember the last state at $72, clear Buttons_Current
+;;   - unless BatteryCheck == $FF, count ticks with P7.1 (battery OK) low in
+;;     BatteryCheck; on the 6th:
+;;     "Please change battery", then "return" into LowBatteryHalt by pushing $3E3E
+;;     onto a fresh stack and executing RETI
+;;   - IdleTicks++ (auto-sleep timeout) and HalfSecTicks++ (general timeouts)
+;; -----------------------------------------------------------------------------
+BaseTimerIsr:
   push  acc
   push  b
   push  c
-  ld    psw
+  ld    psw                             ; the caller's PSW is restored on exit
   st    b
   clr1  psw, rambk0
-  ld    $73
-  bnz   label_3DE0
-  bn    btcr, $03, label_3DE0 ; if base timer irq1 not set then branch
+  ld    FastTickDisabled
+  bnz   .checkHalfSecond
+  bn    btcr, $03, .checkHalfSecond ; if base timer irq1 not set then branch
   clr1  btcr, $03             ; otherwise clear base timer irq1
-  inc   $74
-label_3DE0:
-  bn    btcr, $01, label_3E33 ; if base timer irq0 not set then branch
+  inc   FastTicks
+.checkHalfSecond:
+  bn    btcr, $01, .return ; if base timer irq0 not set then branch
   clr1  btcr, $01             ; otherwise clear base timer irq0
-  callf label_E02A            ; 
-  ld    p3                    ; load button port, active low
+  callf ClockTickEntry                  ; ClockTick
+  ld    p3                              ; any button held?
   xor   #$FF                  ; xor causes pressed buttons to be set
-  bnz   label_3DF5            ; branch if any are pressed
-  ld    $70                   ; 
-  st    $72
-  mov   #$00, $70
-label_3DF5:                   ; branched to if button is pressed
-  ld    $6E                   ; load  battery check
-  be    #$FF, label_3E2F      ; if 0xFF skip checking for low battery
+  bnz   .checkBattery            ; branch if any are pressed
+  ld    Buttons_Current                 ; nothing held: previous state -> Buttons_Last, clear Buttons_Current
+  st    Buttons_Last
+  mov   #$00, Buttons_Current
+.checkBattery:
+  ld    BatteryCheck                   ; load  battery check
+  be    #$FF, .ticks                    ; BatteryCheck == $FF: battery check disabled
   ld    p7                    ; load Port7
-  and   #$02                  ; bit 1 is low voltage detected
-  bnz   label_3E2F            ; branch if low voltage not detected
-  inc   $6E
-  ld    $6E
-  be    #$06, label_3E2F
-  bp    psw, cy, label_3E2F
-  mov   #$16, trl
-  mov   #$3F, trh             ; Load string "Please change battery"
-  mov   #$00, $67
-  mov   #$00, $60
-  mov   #$00, $61
-  callf label_3C07
+  and   #$02                            ; P7.1 = 1: battery voltage OK
+  bnz   .ticks            ; branch if low voltage not detected
+  inc   BatteryCheck                    ; count low-battery ticks
+  ld    BatteryCheck
+  be    #$06, .ticks
+  bp    psw, cy, .ticks
+  mov   #<Str_ChangeBattery, trl        ; Str_ChangeBattery
+  mov   #>Str_ChangeBattery, trh
+  mov   #$00, TextInvert
+  mov   #$00, CursorX
+  mov   #$00, CursorY
+  callf ClearScreen
   call  DrawString
-  mov   #$7F, sp
+  mov   #$7F, sp                        ; fresh stack, fake return address $3E3E (LowBatteryHalt)
   mov   #$3E, acc
   push  acc
   mov   #$3E, acc
   push  acc
-  mov   #$FF, $6E
+  mov   #$FF, BatteryCheck
   reti
-label_3E2F:                   ; jumps to here after battery check?
-  inc   $33
-  inc   SerialTimeout
-label_3E33:                   ; jumps here when base time irq0 not set
+.ticks:
+  inc   IdleTicks                       ; one more half second without a button press
+  inc   HalfSecTicks
+.return:
   ld    b
   st    psw
   pop   c
@@ -7459,92 +8580,124 @@ label_3E33:                   ; jumps here when base time irq0 not set
   pop   acc
   ret
 
-  .byte $23, $0E, $A3, $20, $33, $8F, $20, $10, $07, $20, $10, $17, $20, $36, $86, $D8
-  .byte $63, $D9, $63, $DA, $60, $22, $33, $01, $20, $36, $96, $31, $FF, $4B, $31, $FE
-  .byte $02, $01, $F5, $20, $04, $21, $01, $F0
+;; -----------------------------------------------------------------------------
+;; LowBatteryHalt ($3E3E)
+;; Reached only through BaseTimerIsr's RETI trick, which is why a straight
+;; disassembly finds no reference to it. Reinitialises everything, clears RAM bank 1
+;; and sits in WaitKeyEvent: SLEEP still works, plugging into a controller goes to
+;; MapleMode, everything else is ignored until the batteries are replaced.
+;; -----------------------------------------------------------------------------
+LowBatteryHalt:
+  mov   #$A3, ocr
+  callf HardwareInit
+  callf MapleHwReset
+  callf MapleInitAddress
+  callf ClearUserRam
+  clr1  vsel, $00
+  clr1  vsel, $01
+  clr1  mapletxrxctl, $02
+  mov   #$01, IdleTicks
+.loop:
+  callf WaitKeyEvent
+  be    #$FF, MapleMode
+  be    #$FE, .sleep
+  br    .loop
+.sleep:
+  callf SleepUntilWake
+  br    .loop
 
-
-
-
-
-P3_IRQ_Vector: ; handle buttons and do something with RAM $30 and $33
+;; -----------------------------------------------------------------------------
+;; P3Isr ($3E66)
+;; Button (P3) interrupt. IdleTicks = 1 (restart the auto-sleep timer), refresh
+;; Buttons_Current (1 = pressed) and the newly-pressed mask; MODE cycles BiosMode
+;; 0 -> 1 -> 2 -> 0 (any other value becomes 2), SLEEP toggles SleepCtl bit 0.
+;; -----------------------------------------------------------------------------
+P3Isr:
   push  acc
   push  psw
   clr1  psw, rambk0
-  mov   #$01, $33
+  mov   #$01, IdleTicks                 ; any button: restart the auto-sleep timer
   ld    Buttons_Current
   st    Buttons_Last
-  ld    p3                 ; get buttons
+  ld    p3                              ; P3 is active low
   xor   #$FF               ; invert them to make it so 0 = released
   st    Buttons_Current
   xor   Buttons_Last       ; set only keys that have changed their states
   and   Buttons_Current    ; if the state changed to "0", mask it out and only keep rising edge differences
   st    Buttons_Diff
-  and   #%01000000         ; check for MODE key and this part with $30 checks
+  and   #%01000000                      ; MODE newly pressed?
   bz    .Check_Sleep
-  inc   $30
-  ld    $30
+  inc   BiosMode                        ; MODE: next mode
+  ld    BiosMode
   be    #$02, .Check_Sleep
   bp    psw, cy, .Check_Sleep
-  bne   #$03, .Set30To2
-  mov   #$00, $30
+  bne   #$03, .Set30To2                 ; 3 wraps to 0, anything else (> 3) becomes 2
+  mov   #$00, BiosMode
   br    .Check_Sleep
 .Set30To2:
-  mov   #$02, $30
+  mov   #$02, BiosMode                  ; any unexpected value becomes clock mode
 .Check_Sleep:
   ld    Buttons_Diff
-  and   #%10000000          ; check for SLEEP key, flip this weird bit if it's pressed
+  and   #%10000000                      ; SLEEP newly pressed?
   bz    .exit
-  not1  $35, $00
+  not1  SleepCtl, $00                   ; SLEEP: toggle the sleep request
 .exit:
-  clr1  p3int, $01
+  clr1  p3int, $01                      ; acknowledge the P3 interrupt
   pop   psw
   pop   acc
   ret
 
-
-
-
-
-
-
-label_3EA7:
+;; -----------------------------------------------------------------------------
+;; MapleMode ($3EA7)
+;; The VMU is plugged into a controller (P7.0 high). Switch to the 6 MHz ceramic
+;; oscillator, set up P1 for the Maple bus, reset the Maple hardware and spin;
+;; all the work happens in MapleRxIsr. The Maple hardware is reset (and the screen
+;; cleared) on a Maple bus reset (MAPLESTA.6) or when the P7.2-3 ID pins read back
+;; as the complement of the latched MapleIdPins.
+;; When the 5V disappears, go back to standalone operation (MapleModeExit).
+;; -----------------------------------------------------------------------------
+MapleMode:
   clr1  p3int, $00
-  call  label_3BA9
+  call  ClearScreenAndIcons
   clr1  psw, rambk0
-  mov   #$FF, $6E
-  mov   #%10100010, ocr ; 5KHz, RC off
+  mov   #$FF, BatteryCheck
+  mov   #%10100010, ocr                 ; OCR $A2: quartz + CF running
   nop
   nop
-  mov   #%10010010, ocr ; 1MHz, RC off
+  mov   #%10010010, ocr                 ; OCR $92: run from the CF oscillator
   mov   #$AD, p1ddr
   mov   #$BF, p1fcr
   set1  p1, $06
   clr1  p1, $07
   mov   #$00, t1cnt
-  callf label_1007
-  callf label_1017
-label_3ECB:
+  callf MapleHwReset
+  callf MapleInitAddress
+.loop:
   ld    maplesta
-  bp    acc, $06, label_3EE2
+  bp    acc, $06, .busReset
   ld    p7
   xor   #$FF
   and   #$0C
-  sub   $23
-  bz    label_3EE2
+  sub   MapleIdPins
+  bz    .busReset
   ld    p7
   and   #$01
-  bz    label_3EED
-  br    label_3ECB
-label_3EE2:
-  callf label_1007
-  callf label_1017
-  callf label_3C07
-  br    label_3ECB
-label_3EED:
+  bz    MapleModeExit
+  br    .loop
+.busReset:
+  callf MapleHwReset
+  callf MapleInitAddress
+  callf ClearScreen
+  br    .loop
+;; -----------------------------------------------------------------------------
+;; MapleModeExit ($3EED)
+;; Unplugged: restore P1, clear RAM bank 1, stop the buzzer, quartz clock, and drop
+;; back into MainMenu in file mode with a sleep request pending (SleepCtl = 1).
+;; -----------------------------------------------------------------------------
+MapleModeExit:
   mov   #$80, p1ddr
   mov   #$BF, p1fcr
-  callf Clear_User_RAM
+  callf ClearUserRam
   mov   #$FF, t1lr
   mov   #$FF, t1lc
   mov   #$00, t1cnt
@@ -7552,12 +8705,13 @@ label_3EED:
   clr1  vsel, $00
   clr1  vsel, $01
   clr1  mapletxrxctl, $02
-  mov   #%10100010, ocr ; 5KHz, RC off
-  mov   #$00, $6E
-  mov   #$00, $30
-  mov   #$01, $35
-  jmpf  label_02EF
+  mov   #%10100011, ocr                 ; OCR $A3: back to the 32kHz quartz, RC + CF stopped
+  mov   #$00, BatteryCheck
+  mov   #$00, BiosMode
+  mov   #$01, SleepCtl
+  jmpf  MainMenu
 
+Str_ChangeBattery:
   .string 29 "Please  \r\n change \r\n battery" 
 
   .byte $FF, $FF, $FF
@@ -9112,161 +10266,512 @@ label_3EED:
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $11, $FE, $00, $11, $BC, $01
-  .byte $11, $FB, $01, $11, $6D, $02, $11, $8C, $02, $11, $E6, $02, $11, $05, $03
+ .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+;; -----------------------------------------------------------------------------
+;; FlashLibTable ($E000)
+;; Flash library jump table (Sanyo). Only some entries are used by the BIOS:
+;;   $E000 FactoryFlashTest       $E003 FactoryFlashEndurance1  $E006 FactoryFlashEndurance2
+;;   $E009 FactoryFlashCycles1    $E00C FactoryFlashPageTest    $E00F FactoryFlashCycles2
+;;   $E012 FactoryFlashCycles3    $E015 FlashInit               $E018 FlashProgramPage
+;;   $E01B FlashVerifyPage        $E01E FlashReadByteBank0      $E021 FlashReadByteBank1
+;;   $E024 FlashWritePage         $E027 FlashReadPage           $E02A ClockTick
+;;   $E02D UpdateLeapYear
+;; Page routines work on 128 bytes: flash address FmBank:FmAddrHi:FmAddrLo, data in
+;; bank 1 $80-$FF (R0 is used as the buffer pointer). They expect RAM bank 1.
+;; -----------------------------------------------------------------------------
+FlashLibTable:
+  brf   FactoryFlashTest
+  brf   FactoryFlashEndurance1
+  brf   FactoryFlashEndurance2
+  brf   FactoryFlashCycles1
+  brf   FactoryFlashPageTest
+  brf   FactoryFlashCycles2
+  brf   FactoryFlashCycles3
+FlashInitEntry:
+  brf   FlashInit
+  brf   FlashProgramPage
+FlashVerifyEntry:
+  brf   FlashVerifyPage
+  brf   FlashReadByteBank0
+  brf   FlashReadByteBank1
+FlashWriteEntry:
+  brf   FlashWritePage
+FlashReadEntry:
+  brf   FlashReadPage
+ClockTickEntry:
+  brf   ClockTick
+UpdateLeapYearEntry:
+  brf   UpdateLeapYear
 
-label_E015:
-  brf   label_E33B
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+;; -----------------------------------------------------------------------------
+;; FactoryFlashTest ($E100)
+;; Factory test (never called by the BIOS): fill all 128K of flash with $FF and
+;; verify, then $00, then $FF again, reporting bad addresses on P3/P1, then STOP.
+;; -----------------------------------------------------------------------------
+FactoryFlashTest:
+  mov   #$5F, sp
+  mov   #$FF, p3ddr
+  mov   #$00, p3
+  mov   #$FF, p1ddr
+  mov   #$00, p1
+  callr FlashInit
+  mov   #$FF, b
+  callr FactoryFill
+  callr FactoryVerify
+  mov   #$00, b
+  callr FactoryFill
+  callr FactoryVerify
+  mov   #$FF, b
+  callr FactoryFill
+.stop:
+  set1  pcon, $01
+  br    .stop
+;; -----------------------------------------------------------------------------
+;; FactoryFill ($E12E)
+;; Program every byte of both flash banks with B, waiting for the toggle bit at the
+;; end of each 128-byte page.
+;; -----------------------------------------------------------------------------
+FactoryFill:
+  mov   #$00, trh
+  mov   #$00, trl
+  mov   #$00, $7D
+  ld    $7D
+.bank:
+  st    fpr
+.loop:
+  ld    b
+  stf
+  ld    trl
+  and   #$7F
+  bne   #$7F, .next
+  callr FlashWaitToggle
+.next:
+  inc   trl
+  ld    trl
+  bnz   .loop
+  inc   trh
+  ld    trh
+  bnz   .loop
+  inc   $7D
+  ld    $7D
+  bne   #$02, .bank
+  ret
+;; -----------------------------------------------------------------------------
+;; FactoryVerify ($E15C)
+;; Compare all of flash against B. Each bad page's address is put on P3/P1 and the
+;; routine handshakes with the tester via P7.0 before moving on.
+;; -----------------------------------------------------------------------------
+FactoryVerify:
+  mov   #$00, trh
+  mov   #$00, trl
+  mov   #$00, $7D
+  ld    $7D
+.bank:
+  st    fpr
+.loop:
+  ldf
+  be    b, .next
+  ld    trl
+  rolc
+  ld    trh
+  rolc
+  st    p3
+  ld    b
+  and   #$02
+  or    $7D
+  rolc
+  st    p1
+  mov   #$FA, acc
+.waitHigh:
+  bn    p7, $00, .waitHigh
+  dbnz  acc, .waitHigh
+  mov   #$FA, acc
+.waitLow:
+  bp    p7, $00, .waitLow
+  dbnz  acc, .waitLow
+  ld    trl
+  or    #$7F
+  st    trl
+.next:
+  inc   trl
+  ld    trl
+  bnz   .loop
+  inc   trh
+  ld    trh
+  bnz   .loop
+  inc   $7D
+  ld    $7D
+  bne   #$02, .bank
+  set1  p1, $03
+  ret
+;; -----------------------------------------------------------------------------
+;; FlashWaitToggle ($E1AC)
+;; Wait for a flash program operation to finish: poll until DQ6 stops toggling.
+;; -----------------------------------------------------------------------------
+FlashWaitToggle:
+  ldf
+  st    c
+  not1  c, $06
+.loop:
+  not1  c, $06
+  ldf
+  xor   c
+  bp    acc, $06, .loop
+  ret
+  .byte $50,$F3,$02,$7F,$00,$FA,$A0
+;; -----------------------------------------------------------------------------
+;; FactoryFlashEndurance1 ($E1C1)
+;; Factory endurance test: $1488 x (fill $00, fill $FF), then count mismatches,
+;; show the pass count on P1 and the error count on P3; repeat until an error.
+;; -----------------------------------------------------------------------------
+FactoryFlashEndurance1:
+  mov   #$5F, sp
+  mov   #$00, p1fcr
+  mov   #$FF, p1ddr
+  mov   #$FF, p3ddr
+  mov   #$00, p3
+  callr FlashInit
+  mov   #$00, $77
+.pass:
+  mov   #$14, $78
+  mov   #$88, $79
+.cycle:
+  mov   #$00, b
+  callr FactoryFill
+  mov   #$FF, b
+  callr FactoryFill
+  dbnz  $79, .cycle
+  dbnz  $78, .cycle
+  callr FactoryCountErrors
+  ld    $77
+  st    p1
+  inc   $77
+  ld    $76
+  st    p3
+  or    $75
+  bz    .pass
+.stop:
+  set1  pcon, $01
+  br    .stop
+;; -----------------------------------------------------------------------------
+;; FactoryFlashEndurance2 ($E203)
+;; As FactoryFlashEndurance1 but never stops.
+;; -----------------------------------------------------------------------------
+FactoryFlashEndurance2:
+  mov   #$5F, sp
+  mov   #$00, p1fcr
+  mov   #$FF, p1ddr
+  mov   #$FF, p3ddr
+  mov   #$00, p3
+  callr FlashInit
+  mov   #$00, $77
+.pass:
+  mov   #$14, $78
+  mov   #$88, $79
+.cycle:
+  mov   #$00, b
+  callr FactoryFill
+  mov   #$FF, b
+  callr FactoryFill
+  dbnz  $79, .cycle
+  dbnz  $78, .cycle
+  callr FactoryCountErrors
+  ld    $77
+  st    p1
+  inc   $77
+  ld    $76
+  st    p3
+  br    .pass
+;; -----------------------------------------------------------------------------
+;; FactoryCountErrors ($E23F)
+;; Count bad 128-byte pages (any byte != B) into $75:$76.
+;; -----------------------------------------------------------------------------
+FactoryCountErrors:
+  mov   #$00, $75
+  mov   #$00, $76
+  mov   #$00, trh
+  mov   #$00, trl
+  mov   #$00, $7D
+  ld    $7D
+.bank:
+  st    fpr
+.loop:
+  ldf
+  be    b, .next
+  inc   $76
+  ld    $76
+  bnz   .skipPage
+  inc   $75
+.skipPage:
+  ld    trl
+  or    #$7F
+  st    trl
+.next:
+  inc   trl
+  ld    trl
+  bnz   .loop
+  inc   trh
+  ld    trh
+  bnz   .loop
+  inc   $7D
+  ld    $7D
+  bne   #$02, .bank
+  ret
+;; -----------------------------------------------------------------------------
+;; FactoryFlashCycles1 ($E278)
+;; Factory test: $2810 x (fill $00, fill $FF), then STOP.
+;; -----------------------------------------------------------------------------
+FactoryFlashCycles1:
+  mov   #$5F, sp
+  callr FlashInit
+  mov   #$28, $78
+  mov   #$10, $79
+.cycle:
+  mov   #$00, b
+  callr FactoryFill
+  mov   #$FF, b
+  callr FactoryFill
+  dbnz  $79, .cycle
+  dbnz  $78, .cycle
+.stop:
+  set1  pcon, $01
+  br    .stop
+;; -----------------------------------------------------------------------------
+;; FactoryFlashPageTest ($E29A)
+;; Factory test: program the first page with $00, then repeatedly verify 10 pages,
+;; counting passes on P1, until one fails; then STOP.
+;; -----------------------------------------------------------------------------
+FactoryFlashPageTest:
+  mov   #$5F, sp
+  mov   #$00, p1fcr
+  mov   #$FF, p1ddr
+  mov   #$00, p1
+  callr FlashInit
+  mov   #$00, fpr
+  mov   #$00, trh
+  mov   #$00, trl
+  mov   #$00, b
+  callr FactoryFillPage
+  mov   #$00, $77
+.loop:
+  mov   #$00, trl
+  mov   #$0A, c
+  callr FactoryVerifyPages
+  bnz   .stop
+  inc   $77
+  ld    $77
+  st    p1
+  br    .loop
+.stop:
+  set1  pcon, $01
+  br    .stop
+FactoryFillPage:
+  ld    b
+  stf
+  ld    trl
+  and   #$7F
+  be    #$7F, .wait
+  inc   trl
+  br    FactoryFillPage
+.wait:
+  callr FlashWaitToggle
+  ret
+FactoryVerifyPages:
+  ldf
+  xor   b
+  bnz   .return
+  inc   trl
+  ld    trl
+  and   #$7F
+  bnz   FactoryVerifyPages
+  not1  trl, $07
+  dbnz  c, FactoryVerifyPages
+.return:
+  ret
+;; -----------------------------------------------------------------------------
+;; FactoryFlashCycles2 ($E2F7)
+;; Factory test: $C450 x (fill $00, fill $FF), then STOP.
+;; -----------------------------------------------------------------------------
+FactoryFlashCycles2:
+  mov   #$5F, sp
+  callr FlashInit
+  mov   #$C4, $78
+  mov   #$50, $79
+.cycle:
+  mov   #$00, b
+  callr FactoryFill
+  mov   #$FF, b
+  callr FactoryFill
+  dbnz  $79, .cycle
+  dbnz  $78, .cycle
+.stop:
+  set1  pcon, $01
+  br    .stop
+;; -----------------------------------------------------------------------------
+;; FactoryFlashCycles3 ($E319)
+;; Factory test: $01FC x (fill $00, fill $FF), then STOP.
+;; -----------------------------------------------------------------------------
+FactoryFlashCycles3:
+  mov   #$5F, sp
+  callr FlashInit
+  mov   #$01, $78
+  mov   #$FC, $79
+.cycle:
+  mov   #$00, b
+  callr FactoryFill
+  mov   #$FF, b
+  callr FactoryFill
+  dbnz  $79, .cycle
+  dbnz  $78, .cycle
+.stop:
+  set1  pcon, $01
+  br    .stop
 
-  .byte $11, $2E, $03
-
-label_E01B:
-  brf   label_E388
-
-  .byte $11, $8C, $03, $11, $9A, $03
-
-label_E024:
-  brf   label_E3CE  ; perform flash write 
-label_E027:
-  brf   label_E3F6
-label_E02A:
-  brf   label_E412
-label_E02D:
-  brf   label_E4A0
-
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $23, $06, $5F, $23, $4D, $FF, $23, $4C, $00, $23, $45, $FF, $23, $44, $00, $10
-  .byte $2A, $02, $23, $02, $FF, $10, $17, $00, $10, $42, $00, $23, $02, $00, $10, $0E
-  .byte $00, $10, $39, $00, $23, $02, $FF, $10, $05, $00, $F9, $07, $01, $FC, $23, $05
-  .byte $00, $23, $04, $00, $22, $7D, $00, $02, $7D, $13, $54, $03, $02, $51, $03, $04
-  .byte $E1, $7F, $41, $7F, $03, $10, $65, $00, $63, $04, $03, $04, $90, $ED, $63, $05
-  .byte $03, $05, $90, $E7, $62, $7D, $02, $7D, $41, $02, $DE, $A0, $23, $05, $00, $23
-  .byte $04, $00, $22, $7D, $00, $02, $7D, $13, $54, $50, $33, $02, $29, $03, $04, $F0
-  .byte $03, $05, $F0, $13, $4C, $03, $02, $E1, $02, $D2, $7D, $F0, $13, $44, $23, $00
-  .byte $FA, $98, $5C, $FD, $53, $00, $FA, $23, $00, $FA, $78, $5C, $FD, $53, $00, $FA
-  .byte $03, $04, $D1, $7F, $13, $04, $63, $04, $03, $04, $90, $CD, $63, $05, $03, $05
-  .byte $90, $C7, $62, $7D, $02, $7D, $41, $02, $BE, $FB, $44, $A0, $50, $13, $03, $BE
-  .byte $03, $BE, $03, $50, $F3, $03, $7E, $00, $F8, $A0, $50, $F3, $02, $7F, $00, $FA
-  .byte $A0, $23, $06, $5F, $23, $46, $00, $23, $45, $FF, $23, $4D, $FF, $23, $4C, $00
-  .byte $10, $69, $01, $22, $77, $00, $22, $78, $14, $22, $79, $88, $23, $02, $00, $10
-  .byte $4D, $FF, $23, $02, $FF, $10, $47, $FF, $52, $79, $F1, $52, $78, $EE, $10, $4F
-  .byte $00, $02, $77, $13, $44, $62, $77, $02, $76, $13, $4C, $D2, $75, $80, $D7, $F9
-  .byte $07, $01, $FC, $23, $06, $5F, $23, $46, $00, $23, $45, $FF, $23, $4D, $FF, $23
-  .byte $4C, $00, $10, $27, $01, $22, $77, $00, $22, $78, $14, $22, $79, $88, $23, $02
-  .byte $00, $10, $0B, $FF, $23, $02, $FF, $10, $05, $FF, $52, $79, $F1, $52, $78, $EE
-  .byte $10, $0D, $00, $02, $77, $13, $44, $62, $77, $02, $76, $13, $4C, $01, $D9, $22
-  .byte $75, $00, $22, $76, $00, $23, $05, $00, $23, $04, $00, $22, $7D, $00, $02, $7D
-  .byte $13, $54, $50, $33, $02, $0E, $62, $76, $02, $76, $90, $02, $62, $75, $03, $04
-  .byte $D1, $7F, $13, $04, $63, $04, $03, $04, $90, $E8, $63, $05, $03, $05, $90, $E2
-  .byte $62, $7D, $02, $7D, $41, $02, $D9, $A0, $23, $06, $5F, $10, $BE, $00, $22, $78
-  .byte $28, $22, $79, $10, $23, $02, $00, $10, $A5, $FE, $23, $02, $FF, $10, $9F, $FE
-  .byte $52, $79, $F1, $52, $78, $EE, $F9, $07, $01, $FC, $23, $06, $5F, $23, $46, $00
-  .byte $23, $45, $FF, $23, $44, $00, $10, $93, $00, $23, $54, $00, $23, $05, $00, $23
-  .byte $04, $00, $23, $02, $00, $10, $1B, $00, $22, $77, $00, $23, $04, $00, $23, $03
-  .byte $0A, $10, $21, $00, $90, $08, $62, $77, $02, $77, $13, $44, $01, $ED, $F9, $07
-  .byte $01, $FC, $03, $02, $51, $03, $04, $E1, $7F, $31, $7F, $04, $63, $04, $01, $F2
-  .byte $10, $CA, $FE, $A0, $50, $F3, $02, $90, $0D, $63, $04, $03, $04, $E1, $7F, $90
-  .byte $F3, $BF, $04, $53, $03, $EE, $A0, $23, $06, $5F, $10, $3F, $00, $22, $78, $C4
-  .byte $22, $79, $50, $23, $02, $00, $10, $26, $FE, $23, $02, $FF, $10, $20, $FE, $52
-  .byte $79, $F1, $52, $78, $EE, $F9, $07, $01, $FC, $23, $06, $5F, $10, $1D, $00, $22
-  .byte $78, $01, $22, $79, $FC, $23, $02, $00, $10, $04, $FE, $23, $02, $FF, $10, $FE
-  .byte $FD, $52, $79, $F1, $52, $78, $EE, $F9, $07, $01, $FC
-
-label_E33B:
+;; -----------------------------------------------------------------------------
+;; FlashInit ($E33B)
+;; Flash controller set-up done once by HardwareInit. Writes undocumented SFRs
+;; ($155, $148, $151) and EXT bits 3/1.
+;; -----------------------------------------------------------------------------
+FlashInit:
   set1  ext, $03
   clr1  ext, $01
   mov   #$FF, sfr_0155
   mov   #$00, sfr_0148
   set1  sfr_0151, $05
   ret
-label_E348:
+;; -----------------------------------------------------------------------------
+;; FlashProgramPage ($E348)
+;; Program the 128-byte bank 1 buffer into flash at FmBank:FmAddrHi:FmAddrLo (wrapping
+;; within the page) and wait for completion: DQ7 data polling if FlashWaitMode.0 is
+;; set, DQ6 toggle polling otherwise. The unlock sequence must already have been
+;; issued (FlashWritePage does both).
+;; -----------------------------------------------------------------------------
+FlashProgramPage:
   mov   #$80, $00
-  ld    $7D
+  ld    FmBank
   and   #$01
   st    fpr
-  ld    $7E
+  ld    FmAddrHi
   st    trh
-  ld    $7F
+  ld    FmAddrLo
   st    trl
-label_E359:
+.loop:
   ld    @R0
   stf
   st    b
   inc   $00
   ld    $00
-  bz    label_E36F
+  bz    .wait
   inc   trl
   ld    trl
   and   #$7F
-  bnz   label_E359
+  bnz   .loop
   not1  trl, $07
-  br    label_E359
-label_E36F:
-  bn    $7C, $00, label_E37A
-label_E372:
+  br    .loop
+.wait:
+  bn    FlashWaitMode, $00, .toggle
+.dataPoll:
   ldf
   xor   b
-  bp    acc, $07, label_E372
-  br    label_E387
-label_E37A:
+  bp    acc, $07, .dataPoll
+  br    .return
+.toggle:
   ldf
   st    c
   not1  c, $06
-label_E37F:
+.toggleLoop:
   not1  c, $06
   ldf
   xor   c
-  bp    acc, $06, label_E37F
-label_E387:
+  bp    acc, $06, .toggleLoop
+.return:
   ret
-label_E388:
+;; -----------------------------------------------------------------------------
+;; FlashVerifyPage ($E388)
+;; FM_VRF_EX ($0110). Compare flash at FmBank:FmAddrHi:FmAddrLo with the bank 1 buffer.
+;; Out: ACC = 0 if all 128 bytes match (R0 = $00), otherwise the XOR of the first
+;; difference.
+;; -----------------------------------------------------------------------------
+FlashVerifyPage:
   mov   #$80, $00
-  ld    $7D
+  ld    FmBank
   st    fpr
-  ld    $7E
+  ld    FmAddrHi
   st    trh
-  ld    $7F
+  ld    FmAddrLo
   st    trl
-label_E397:
+.loop:
   ldf
   xor   @R0
-  bnz   label_E3AB
+  bnz   .return
   inc   trl
   ld    trl
   and   #$7F
-  bnz   label_E3A5
+  bnz   .next
   not1  trl, $07
-label_E3A5:
+.next:
   inc   $00
   ld    $00
-  bnz   label_E397
-label_E3AB:
+  bnz   .loop
+.return:
   ret
 
-  .byte $22, $00, $80, $23, $54, $00, $02, $7E, $13, $05, $02, $7F, $13, $04, $50, $14
-  .byte $A0, $22, $00, $80, $23, $54, $01, $02, $7E, $13, $05, $02, $7F, $13, $04, $50
-  .byte $14, $A0
+;; -----------------------------------------------------------------------------
+;; FlashReadByteBank0 ($E3AC)
+;; Unreferenced: read the byte at bank 0 FmAddrHi:FmAddrLo into bank 1 $80.
+;; -----------------------------------------------------------------------------
+FlashReadByteBank0:
+  mov   #$80, $00
+  mov   #$00, fpr
+  ld    FmAddrHi
+  st    trh
+  ld    FmAddrLo
+  st    trl
+  ldf
+  st    @R0
+  ret
+;; -----------------------------------------------------------------------------
+;; FlashReadByteBank1 ($E3BD)
+;; Unreferenced: same for flash bank 1.
+;; -----------------------------------------------------------------------------
+FlashReadByteBank1:
+  mov   #$80, $00
+  mov   #$01, fpr
+  ld    FmAddrHi
+  st    trh
+  ld    FmAddrLo
+  st    trl
+  ldf
+  st    @R0
+  ret
 
 ; ====== PERFORM FLASH UNLOCKERY SAFETY DANCE ======
-label_E3CE:
+;; -----------------------------------------------------------------------------
+;; FlashWritePage ($E3CE)
+;; FM_WRT. Issue the AMD-style unlock sequence ($AA -> $5555, $55 -> $2AAA,
+;; $A0 -> $5555) with FPR.1 (write enable) set, then FlashProgramPage.
+;; No range checking at all: this is what FmWrtExGuard protects.
+;; -----------------------------------------------------------------------------
+FlashWritePage:
   set1  fpr, $01    ; unlock flash for write 
-  call  label_E3D7  ; write unlock state machine to flash
+  call  FlashUnlock  ; write unlock state machine to flash
   clr1  fpr, $01    ; lock flash for write 
-  call  label_E348  ; perform actual flash write 
+  call  FlashProgramPage  ; perform actual flash write 
   ret
-label_E3D7:         ; unlock SM state 0
+FlashUnlock:         ; unlock SM state 0
   mov   #$55, trh   
   mov   #$55, trl   ; write 0xaa to 0x5555
   mov   #$AA, acc
@@ -9280,134 +10785,150 @@ label_E3D7:         ; unlock SM state 0
   mov   #$A0, acc   ; write 0xa0 to 0x5555
   stf               ; should be unlocked now!
   ret
-label_E3F6:
+;; -----------------------------------------------------------------------------
+;; FlashReadPage ($E3F6)
+;; FM_PRD_EX ($0120). Copy 128 bytes of flash at FmBank:FmAddrHi:FmAddrLo into the
+;; bank 1 buffer at $80-$FF (TRL wraps, so the read stays inside one 256-byte page).
+;; -----------------------------------------------------------------------------
+FlashReadPage:
   mov   #$80, $00
-  ld    $7D
+  ld    FmBank
   st    fpr
-  ld    $7E
+  ld    FmAddrHi
   st    trh
-  ld    $7F
+  ld    FmAddrLo
   st    trl
-label_E405:
+.loop:
   ldf
   st    @R0
   inc   $00
   ld    $00
   inc   trl
-  bz    label_E411
-  br    label_E405
-label_E411:
+  bz    .return
+  br    .loop
+.return:
   ret
-label_E412:
+;; -----------------------------------------------------------------------------
+;; ClockTick ($E412)
+;; Called every half second by BaseTimerIsr. Every second tick advances the binary
+;; date/time (Second..YearHi) with correct month lengths; on New Year it recomputes
+;; LeapYear. The BCD copy at $10-$16 is NOT updated here.
+;; -----------------------------------------------------------------------------
+ClockTick:
   push  acc
   push  b
   push  c
   push  $00
-  ld    $1E
-  bnz   label_E420
-  jmp   label_E495
-label_E420:
-  mov   #$00, $1E
-  inc   $1D
-  ld    $1D
-  be    #$3C, label_E42C
-  jmp   label_E497
-label_E42C:
-  mov   #$00, $1D
-  inc   $1C
-  ld    $1C
-  be    #$3C, label_E438
-  jmp   label_E497
-label_E438:
-  mov   #$00, $1C
-  inc   $1B
-  ld    $1B
-  be    #$18, label_E444
-  jmp   label_E497
-label_E444:
-  mov   #$00, $1B
-  inc   $1A
-  ld    $19
-  be    #$0B, label_E461
-  be    #$09, label_E461
-  be    #$06, label_E461
-  be    #$04, label_E461
-  be    #$02, label_E468
-  ld    $1A
-  be    #$20, label_E47A
-  jmp   label_E497
-label_E461:
-  ld    $1A
-  be    #$1F, label_E47A
-  jmp   label_E497
-label_E468:
-  ld    $1F
-  bnz   label_E473
-  ld    $1A
-  be    #$1D, label_E47A
-  jmp   label_E497
-label_E473:
-  ld    $1A
-  be    #$1E, label_E47A
-  jmp   label_E497
-label_E47A:
-  mov   #$01, $1A
-  inc   $19
-  ld    $19
-  be    #$0D, label_E486
-  jmp   label_E497
-label_E486:
-  mov   #$01, $19
-  inc   $18
-  ld    $18
-  bnz   label_E491
-  inc   $17
-label_E491:
-  call  label_E4A0
-  jmp   label_E497
-label_E495:
-  set1  $1E, $00
-label_E497:
+  ld    HalfSecond
+  bnz   .second
+  jmp   .halfSecond
+.second:
+  mov   #$00, HalfSecond
+  inc   Second
+  ld    Second
+  be    #$3C, .minute
+  jmp   .return
+.minute:
+  mov   #$00, Second
+  inc   Minute
+  ld    Minute
+  be    #$3C, .hour
+  jmp   .return
+.hour:
+  mov   #$00, Minute
+  inc   Hour
+  ld    Hour
+  be    #$18, .day
+  jmp   .return
+.day:
+  mov   #$00, Hour
+  inc   Day
+  ld    Month
+  be    #$0B, .month30
+  be    #$09, .month30
+  be    #$06, .month30
+  be    #$04, .month30
+  be    #$02, .february
+  ld    Day
+  be    #$20, .nextMonth
+  jmp   .return
+.month30:
+  ld    Day
+  be    #$1F, .nextMonth
+  jmp   .return
+.february:
+  ld    LeapYear
+  bnz   .februaryLeap
+  ld    Day
+  be    #$1D, .nextMonth
+  jmp   .return
+.februaryLeap:
+  ld    Day
+  be    #$1E, .nextMonth
+  jmp   .return
+.nextMonth:
+  mov   #$01, Day
+  inc   Month
+  ld    Month
+  be    #$0D, .nextYear
+  jmp   .return
+.nextYear:
+  mov   #$01, Month
+  inc   YearLo
+  ld    YearLo
+  bnz   .leap
+  inc   YearHi
+.leap:
+  call  UpdateLeapYear
+  jmp   .return
+.halfSecond:
+  set1  HalfSecond, $00
+.return:
   pop   $00
   pop   c
   pop   b
   pop   acc
   ret
-label_E4A0:
+;; -----------------------------------------------------------------------------
+;; UpdateLeapYear ($E4A0)
+;; YearDiv4Hi:YearDiv4Lo = year / 4 and LeapYear = Gregorian leap year
+;; (divisible by 4, and not by 100 unless by 400).
+;; -----------------------------------------------------------------------------
+UpdateLeapYear:
   push  $00
   push  b
   push  c
   clr1  psw, cy
-  ld    $18
+  ld    YearLo
   st    c
   mov   #$04, b
-  ld    $17
+  ld    YearHi
   div
-  st    $50
+  st    YearDiv4Hi
   ld    c
-  st    $51
+  st    YearDiv4Lo
   ld    b
-  bnz   label_E4DE
-  set1  $1F, $00
-  ld    $18
+  bnz   .notLeap
+  set1  LeapYear, $00
+  ld    YearLo
   st    c
   mov   #$64, b
-  ld    $17
+  ld    YearHi
   div
   ld    b
-  bnz   label_E4E1
-  ld    $51
+  bnz   .return
+  ld    YearDiv4Lo
   st    c
-  ld    $50
+  ld    YearDiv4Hi
   mov   #$64, b
   div
   ld    b
-  bnz   label_E4DE
-  set1  $1F, $00
-  jmp   label_E4E1
-label_E4DE:
-  mov   #$00, $1F
-label_E4E1:
+  bnz   .notLeap
+  set1  LeapYear, $00
+  jmp   .return
+.notLeap:
+  mov   #$00, LeapYear
+.return:
   pop   c
   pop   b
   pop   $00
@@ -9462,7 +10983,16 @@ label_E4E1:
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
   .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
-  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF, $00, $00, $00, $00, $00, $00, $00, $00
+  .byte $FF, $FF, $FF, $FF, $FF, $FF, $FF, $FF
+;; -----------------------------------------------------------------------------
+;; FontAscii6x8 ($E800)
+;; 6x8 font for DrawChar6x8: 8 planes of 256 bytes, plane n holds pixel row n of every
+;; character (bits 7-2 used). Besides ASCII it has the bold SEGA logo ($17-$1A, also
+;; used as the A/B button icons $1A/$1B), arrows ($82), the "No." sign ($85), a
+;; bullet ($EF) and the connector spinner frames ($F0-$F7).
+;; -----------------------------------------------------------------------------
+FontAscii6x8:
+  .byte $00, $00, $00, $00, $00, $00, $00, $00
   .byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $20, $00, $00, $70, $D8, $88, $78
   .byte $78, $78, $20, $F0, $98, $D8, $D8, $70, $00, $20, $50, $50, $20, $C0, $60, $60
   .byte $10, $40, $00, $00, $00, $00, $00, $00, $70, $20, $70, $F8, $10, $F8, $30, $F8
@@ -9838,30 +11368,88 @@ label_E4E1:
   ;; Pad size of binary
   .cnop $00, $0200
 
-  ;; RAM definitions
-  ;; Bank 0
-  ;;
-;; NOTE: Not all usages of this address seem related to this task.
-;; It might be reasonable to define multiple symbols for the same address, to distinguish different usages/meanings of the address
+ ;; ===========================================================================
+ ;; RAM definitions
+ ;; ===========================================================================
+ ;; Bank 0: BIOS system variables
+BcdYearHi        = $10   ; BCD date/time copy (Maple/clock set, file timestamps)
+BcdYearLo        = $11
+BcdMonth         = $12
+BcdDay           = $13
+BcdHour          = $14
+BcdMinute        = $15
+BcdSecond        = $16
+YearHi           = $17   ; binary date/time, advanced by ClockTick
+YearLo           = $18
+Month            = $19   ; 1-12
+Day              = $1A   ; 1-31
+Hour             = $1B   ; 0-23
+Minute           = $1C   ; 0-59
+Second           = $1D   ; 0-59
+HalfSecond       = $1E   ; toggles every base timer tick; a second passes on 1 -> 0
+LeapYear         = $1F   ; 1 if the current year is a leap year (UpdateLeapYear)
+MapleMyAddr      = $20   ; our Maple address incl. port bits (latched from a device request)
+MapleHostAddr    = $21   ; sender of the frame being answered
+MapleAddrState   = $22   ; 0 = no address yet, $FF = addressed, $55 = killed
+MapleIdPins      = $23   ; P7.2-3 when the address was derived
+MapleLastCmd     = $24   ; last command handled / error reply sent, replayed on a resend request
+MapleExpectedPhase = $25 ; storage block write: next expected phase (0-3)
+MapleWriteBlock  = $26   ; storage block write: block number given in phase 0
+MapleStorageErr  = $27   ; storage error bits (see MapleBlockToFlashAddr/MapleStorageBlockWrite)
+MapleLcdErr      = $28   ; LCD block write error bits
+MapleFuncType    = $29   ; function of the current frame: 2 storage, 4 LCD, 8 clock, $FF other
+CopyRxArm        = $2B   ; VMU-to-VMU receive: 0 off, 1 armed, $FF suppressed
+WarmBootMagic    = $2C   ; $2C-$2F = "REST" once RAM has been initialised
+BiosMode         = $30   ; 0 file manager, 1 game, 2 clock
+DateSet          = $31   ; $FF once the user (or the Dreamcast) has set the clock
+ClockAnim        = $32   ; clock animation: bits 7-6 animal, 5 frame, 4 resting, 3-0 step
+IdleTicks        = $33   ; reset to 1 by any button, +1 per half second; 0 = auto-sleep
+HalfSecTicks     = $34   ; +1 per half second; cleared by code that wants a timeout
+SleepCtl         = $35   ; bit0 SLEEP pressed, $40 = ignore sleep, $80 = caller handles it
+FreeUserBlocksHi = $36   ; free blocks 0-199
+FreeUserBlocks   = $37
+FreeGameBlocksHi = $38   ; free blocks at the start of the volume (room for a game)
+FreeGameBlocks   = $39
+FileCountHi      = $3A   ; number of files (CountFiles)
+FileCount        = $3B
+SelectedFileHi   = $3C   ; file shown in the file manager (1-based)
+SelectedFile     = $3D
+FreeExtraBlocksHi = $3E  ; free blocks 200-230
+FreeExtraBlocks  = $3F
+YearDiv4Hi       = $50   ; year / 4 (UpdateLeapYear)
+YearDiv4Lo       = $51
+MathHi           = $52   ; result of the BCD/binary conversions and block-number scratch
+MathLo           = $53
+FatBank          = $54   ; flash address of the FAT block (FPR bit, high, low)
+FatAddrHi        = $55
+FatAddrLo        = $56
+DirBlock         = $58   ; directory block being scanned
+FsError          = $5C   ; filesystem error bits (shown as "System error xx")
+CursorX          = $60   ; text cursor column
+CursorY          = $61   ; text cursor row
+TextInvert       = $67   ; $FF = draw inverted / clear to black
+GameLastBlock    = $6D   ; last block of the game file (FmWrtExGuard limit)
+BatteryCheck     = $6E   ; $FF = no low-battery check, else counts low-battery ticks
+FlashBankTemp    = $6F   ; copy of FPR.0 for the current flash pointer
+Buttons_Current  = $70   ; buttons held, 1 = pressed (see the overview)
+Buttons_Diff     = $71   ; buttons newly pressed since the last P3 interrupt
+Buttons_Last     = $72   ; previous Buttons_Current (also written by BaseTimerIsr)
+FastTickDisabled = $73   ; 0 while FastTickOn is active
+FastTicks        = $74   ; base timer interrupt 1 count (key repeat)
+
+ ;; Bank 1: application bank, firmware-call parameters, copy buffers
+DataToTransmit   = $10   ; VMU-to-VMU: outgoing packet
+CopyBlocksLeft   = $24   ; VMU-to-VMU send: blocks still to send
 NBytesToVerify   = $25
-
 NBytesToSend     = $26
-
-SerialTimeout    = $34
-NFreeBlocks      = $39
-NBlocksToWrite   = $3D
+DataTransmitted  = $28   ; VMU-to-VMU: bytes as actually shifted out / received packet
+NBlocksToWrite   = $3D   ; VMU-to-VMU receive: blocks in the incoming file
 NBytesToReceive  = $3E
 RxPayloadSize    = $3F
-
-FlashBankTemp    = $6F
-Buttons_Current  = $70
-Buttons_Last     = $71
-Buttons_Diff     = $72
-
-  ;; Bank 1
-  ;;
-DataToTransmit   = $10
-DataTransmitted  = $28
+FlashWaitMode    = $7C   ; bit0: FlashProgramPage waits with DQ7 polling instead of DQ6 toggle
+FmBank           = $7D   ; firmware calls: flash address bit 16
+FmAddrHi         = $7E   ; firmware calls: flash address bits 15-8
+FmAddrLo         = $7F   ; firmware calls: flash address bits 7-0; data buffer at $80-$FF
 
   ;; PSW bits
 p EQU $00
